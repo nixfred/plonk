@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# plonk — collapse Hyprland workspaces down to the lowest numbers.
+#
+# Hyprland can't renumber a workspace, so plonk moves every window from
+# occupied workspace N to the lowest free slot, processing ascending so a
+# target is always empty (or is the workspace already being moved).
+# Special/scratchpad workspaces (id < 1) are left alone. Works per monitor.
+#
+# Usage: plonk [-n|--dry-run]
+set -euo pipefail
+
+dry=0
+[[ "${1:-}" == "-n" || "${1:-}" == "--dry-run" ]] && dry=1
+
+for c in hyprctl jq; do command -v "$c" >/dev/null || { echo "plonk: $c not found" >&2; exit 1; }; done
+
+# Hyprland >= 0.56 uses Lua dispatchers; fall back to legacy syntax on older builds.
+move_win() { # move_win <addr> <ws>
+  hyprctl dispatch "hl.dsp.window.move({ window = \"address:$1\", workspace = \"$2\", follow = false })" >/dev/null 2>&1 \
+    || hyprctl dispatch movetoworkspacesilent "$2,address:$1" >/dev/null
+}
+focus_ws() { # focus_ws <ws>
+  hyprctl dispatch "hl.dsp.focus({ workspace = \"$1\" })" >/dev/null 2>&1 \
+    || hyprctl dispatch workspace "$1" >/dev/null
+}
+
+active=$(hyprctl activeworkspace -j | jq -r '.id')
+clients=$(hyprctl clients -j)
+new_active=$active
+moves=0
+
+# Per monitor: occupied regular workspaces, ascending. Target slot starts at 1.
+while IFS= read -r mon; do
+  target=1
+  while IFS= read -r ws; do
+    if (( ws != target )); then
+      if (( dry )); then
+        echo "would move workspace $ws -> $target ($mon)"
+      else
+        while IFS= read -r addr; do
+          move_win "$addr" "$target"
+        done < <(jq -r --argjson w "$ws" '.[] | select(.workspace.id == $w) | .address' <<<"$clients")
+        echo "moved workspace $ws -> $target ($mon)"
+      fi
+      (( ws == active )) && new_active=$target
+      moves=$((moves+1))
+    fi
+    target=$((target+1))
+  done < <(hyprctl workspaces -j | jq -r --arg m "$mon" '.[] | select(.monitor == $m and .id > 0 and .windows > 0) | .id' | sort -n)
+done < <(hyprctl monitors -j | jq -r '.[].name')
+
+if (( dry == 0 )); then
+  (( new_active != active )) && focus_ws "$new_active" || true
+  (( moves == 0 )) && echo "plonk: already compact" || true
+fi
