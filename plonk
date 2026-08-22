@@ -21,7 +21,15 @@
 # Usage: plonk [-n|--dry-run] | plonk --watch [--notify]
 set -euo pipefail
 
-NAMES_FILE="${WORKSPACE_NAMES_FILE:-$HOME/.config/omarchy/workspace-names.json}"
+if [[ ${WORKSPACE_NAMES_FILE+x} ]]; then
+  NAMES_FILE=$WORKSPACE_NAMES_FILE
+elif [[ -n ${XDG_CONFIG_HOME:-} ]]; then
+  NAMES_FILE=$XDG_CONFIG_HOME/omarchy/workspace-names.json
+elif [[ -n ${HOME:-} ]]; then
+  NAMES_FILE=$HOME/.config/omarchy/workspace-names.json
+else
+  NAMES_FILE=
+fi
 
 usage() { echo "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]" >&2; }
 
