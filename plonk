@@ -85,6 +85,16 @@ compact() {
     done < <(jq -r --argjson w "$src" '.[] | select(.workspace.id == $w) | .address' <<<"$clients")
   }
 
+  # Snapshot the names file before plonk rewrites it (keeps the last 20 in
+  # $XDG_STATE_HOME/plonk/names-backups, or $PLONK_STATE_DIR) so a bad remap
+  # is always recoverable: ls -t ~/.local/state/plonk/names-backups | head.
+  backup_names() {
+    local dir="${PLONK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/plonk}/names-backups"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    cp -p "$NAMES_FILE" "$dir/workspace-names.$(date +%Y%m%d-%H%M%S.%N).json" 2>/dev/null || return 0
+    ls -1t "$dir"/workspace-names.*.json 2>/dev/null | tail -n +21 | xargs -r rm -f --
+  }
+
   # Carry a workspace-names.json title (nixfred.workspace-names plugin, keyed
   # by workspace id) from src to dst so labels never land on the wrong number.
   # Atomic write like the workspace-name tool; no-op without file/name.
@@ -96,6 +106,7 @@ compact() {
     # sticky to the slot and plonk never deletes one on its own (2026-08-22:
     # the "clear stale label" experiment wiped Fred's names; never again).
     jq -e --arg s "$src" 'type == "object" and has($s)' "$NAMES_FILE" >/dev/null 2>&1 || return 0
+    backup_names
     tmp=$(mktemp "${NAMES_FILE}.XXXXXX") || return 0
     if jq --arg s "$src" --arg d "$dst" '.[$d] = .[$s] | del(.[$s])' "$NAMES_FILE" >"$tmp" 2>/dev/null; then
       mv "$tmp" "$NAMES_FILE"

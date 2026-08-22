@@ -25,6 +25,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 # (2026-08-22: a test run without this remapped Fred's live workspace titles.)
 export WORKSPACE_NAMES_FILE="$tmpdir/names-sandbox.json"
 export XDG_CONFIG_HOME="$tmpdir/xdg-sandbox"
+export PLONK_STATE_DIR="$tmpdir/state-sandbox"
 stub="$tmpdir/bin"
 log="$tmpdir/hyprctl.log"
 mkdir -p "$stub"
@@ -106,6 +107,8 @@ printf '%s\n' '{"1":"Keep","2":"Me"}' >"$names"
 WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
 [[ $(jq -c . "$names") == '{"1":"Keep","2":"Me"}' ]] || fail "unnamed arrivals must not touch existing titles, got: $(cat "$names")"
 pass "plonk never deletes a title on its own"
+ls "$tmpdir/state-sandbox/names-backups"/workspace-names.*.json >/dev/null 2>&1 || fail "a names backup is written before any remap"
+pass "names file is backed up before plonk rewrites it"
 
 # names file missing -> no-op, no error
 : >"$log"
