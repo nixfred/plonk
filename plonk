@@ -5,6 +5,9 @@
 # and keeps its layout. Falls back to moving windows when the target ID is
 # already taken (empty persistent workspace) or change_id is unavailable.
 # Special/scratchpad workspaces (id < 1) and named workspaces are left alone.
+# Titles from the nixfred.workspace-names plugin (workspace-names.json, keyed
+# by id) travel with the workspace when it is renumbered; override the file
+# with WORKSPACE_NAMES_FILE.
 # If you were sitting on an empty workspace you land on the first free slot
 # after the compacted ones. Sends a desktop notification when available
 # (omarchy-notification-send / notify-send).
@@ -17,6 +20,8 @@
 #
 # Usage: plonk [-n|--dry-run] | plonk --watch [--notify]
 set -euo pipefail
+
+NAMES_FILE="${WORKSPACE_NAMES_FILE:-$HOME/.config/omarchy/workspace-names.json}"
 
 usage() { echo "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]" >&2; }
 
@@ -75,12 +80,28 @@ compact() {
     done < <(jq -r --argjson w "$src" '.[] | select(.workspace.id == $w) | .address' <<<"$clients")
   }
 
+  # Carry a workspace-names.json title (nixfred.workspace-names plugin, keyed
+  # by workspace id) from src to dst so labels never land on the wrong number.
+  # Atomic write like the workspace-name tool; no-op without file/name.
+  remap_name() { # src dst
+    local src=$1 dst=$2 tmp
+    [[ -s $NAMES_FILE ]] || return 0
+    jq -e --arg s "$src" 'type == "object" and has($s)' "$NAMES_FILE" >/dev/null 2>&1 || return 0
+    tmp=$(mktemp "${NAMES_FILE}.XXXXXX") || return 0
+    if jq --arg s "$src" --arg d "$dst" '.[$d] = .[$s] | del(.[$s])' "$NAMES_FILE" >"$tmp" 2>/dev/null; then
+      mv "$tmp" "$NAMES_FILE"
+    else
+      rm -f "$tmp"
+    fi
+  }
+
   renumber() { # src dst mon
     local src=$1 dst=$2 mon=$3
     if [[ -z ${taken[$dst]+x} ]]; then
       if hyprctl dispatch "hl.dsp.workspace.change_id({ workspace = \"$src\", id = $dst })" >/dev/null 2>&1; then
         unset "taken[$src]"
         taken[$dst]=1
+        remap_name "$src" "$dst"
         return 0
       fi
     fi
@@ -88,6 +109,7 @@ compact() {
     hypr_dispatch "hl.dsp.workspace.move({ workspace = \"$dst\", monitor = \"$mon\" })" \
       moveworkspacetomonitor "$dst" "$mon"
     taken[$dst]=1
+    remap_name "$src" "$dst"
   }
 
   notify() { # headline

@@ -81,6 +81,27 @@ grep -F 'window.move' "$log" >/dev/null && fail "does not window.move when chang
 grep -Fx 'moved workspace 7 -> 3 (eDP-1)' <<<"$out" >/dev/null || fail "prints the move, got: $out"
 pass "collapses gaps with change_id, skips special, refocuses"
 
+# --- workspace-names.json titles travel with the workspace ------------------
+names="$tmpdir/workspace-names.json"
+printf '%s\n' '{"_config":{"hold":900},"1":"Plonk","3":"Brave","4":"Voice","7":"Blank","9":"Stale"}' >"$names"
+: >"$log"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -r '."1"' "$names") == Brave ]] || fail "3 -> 1 carries 'Brave' onto the empty slot (was 'Plonk'), got: $(cat "$names")"
+[[ $(jq -r '."2"' "$names") == Voice ]] || fail "4 -> 2 carries 'Voice', got: $(cat "$names")"
+[[ $(jq -r '."3"' "$names") == Blank ]] || fail "7 -> 3 carries 'Blank' (overwriting stale 'Brave'), got: $(cat "$names")"
+[[ $(jq -r 'has("4")' "$names") == false && $(jq -r 'has("7")' "$names") == false ]] || fail "old keys removed, got: $(cat "$names")"
+[[ $(jq -r '."9"' "$names") == Stale ]] || fail "names of workspaces plonk did not touch stay put"
+[[ $(jq -r '._config.hold' "$names") == 900 ]] || fail "_config preserved"
+ls "$tmpdir"/workspace-names.json.* >/dev/null 2>&1 && fail "no temp files left behind"
+grep -F 'rename' "$log" >/dev/null && fail "never touches Hyprland workspace names"
+pass "workspace-names.json titles travel with renumbered workspaces"
+
+# names file missing -> no-op, no error
+: >"$log"
+WORKSPACE_NAMES_FILE="$tmpdir/does-not-exist.json" run_plonk >/dev/null || fail "missing names file must not fail"
+[[ ! -e "$tmpdir/does-not-exist.json" ]] || fail "does not create a names file"
+pass "no names file is fine"
+
 # --- dry run prints the plan and dispatches nothing ------------------------
 : >"$log"
 out=$(run_plonk --dry-run)
