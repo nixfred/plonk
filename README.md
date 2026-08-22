@@ -20,13 +20,14 @@ plonk: already compact
 
 ## How it works
 
-Hyprland has no "renumber workspace" dispatcher, so plonk moves every window from each occupied workspace into the lowest free slot, ascending — the target is always empty by construction. Focus follows your active workspace to its new number.
+Hyprland workspace IDs are global. Plonk walks occupied numeric workspaces in ascending order and packs them into 1..N, so the destination ID is free (or is an empty persistent workspace). It prefers `hl.dsp.workspace.change_id` — the workspace stays on its monitor and keeps its layout — and only moves windows when that ID is already taken. Focus follows your active workspace to its new number.
 
 - Special/scratchpad workspaces (id < 1) are left alone
-- Multi-monitor aware (compacts per monitor)
+- Named workspaces are left alone
+- Multi-monitor: fills holes in the global number line; workspaces do not jump heads
 - Idempotent — safe to mash the key
 
-Dependencies: `hyprctl`, `jq` (both ship with Omarchy).
+Dependencies: `hyprctl`, `jq` (both ship with Omarchy). `bash test.sh` runs the stubbed regression tests (no live compositor required).
 
 ## Install
 
