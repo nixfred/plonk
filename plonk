@@ -66,10 +66,15 @@ compact() {
   new_active=$active
   moves=0
 
-  local -A taken=()
+  local -A taken=() blocked=()
   while IFS= read -r id; do
     [[ $id =~ ^[0-9]+$ ]] && taken[$id]=1
   done < <(jq -r '.[] | select(.id > 0) | .id' <<<"$workspaces")
+  # Named workspaces keep a numeric id. Never land on those — change_id would
+  # fail (id taken, rc=0) and the window-move fallback would merge into them.
+  while IFS= read -r id; do
+    [[ $id =~ ^[0-9]+$ ]] && blocked[$id]=1
+  done < <(jq -r '.[] | select(.id > 0 and ((.name // "") | test("^[0-9]+$") | not)) | .id' <<<"$workspaces")
 
   move_windows() { # src dst
     local src=$1 dst=$2
@@ -86,11 +91,13 @@ compact() {
   remap_name() { # src dst
     local src=$1 dst=$2 tmp
     [[ -s $NAMES_FILE ]] || return 0
-    # Nothing to do unless src is named or dst carries a stale label.
-    jq -e --arg s "$src" --arg d "$dst" 'type == "object" and (has($s) or has($d))' "$NAMES_FILE" >/dev/null 2>&1 || return 0
+    # Only a NAMED workspace carries its title along. An unnamed workspace
+    # arriving on a slot leaves whatever title is there alone — titles are
+    # sticky to the slot and plonk never deletes one on its own (2026-08-22:
+    # the "clear stale label" experiment wiped Fred's names; never again).
+    jq -e --arg s "$src" 'type == "object" and has($s)' "$NAMES_FILE" >/dev/null 2>&1 || return 0
     tmp=$(mktemp "${NAMES_FILE}.XXXXXX") || return 0
-    # dst now holds src's workspace: take src's name, or drop dst's stale one.
-    if jq --arg s "$src" --arg d "$dst" 'if has($s) then .[$d] = .[$s] | del(.[$s]) else del(.[$d]) end' "$NAMES_FILE" >"$tmp" 2>/dev/null; then
+    if jq --arg s "$src" --arg d "$dst" '.[$d] = .[$s] | del(.[$s])' "$NAMES_FILE" >"$tmp" 2>/dev/null; then
       mv "$tmp" "$NAMES_FILE"
     else
       rm -f "$tmp"
@@ -133,7 +140,7 @@ compact() {
   while IFS=$'\t' read -r ws mon; do
     [[ $ws =~ ^[0-9]+$ ]] || continue
     ((ws == active)) && active_seen=1
-    while ((skip_target != 0 && target == skip_target)); do
+    while ((skip_target != 0 && target == skip_target)) || [[ -n ${blocked[$target]+x} ]]; do
       target=$((target + 1))
     done
     if ((ws != target)); then
@@ -141,7 +148,8 @@ compact() {
         echo "would move workspace $ws -> $target ($mon)"
       else
         renumber "$ws" "$target" "$mon"
-        ((quiet)) || echo "moved workspace $ws -> $target ($mon)"
+        if ((quiet)); then echo "plonk: moved workspace $ws -> $target ($mon)" >&2
+        else echo "moved workspace $ws -> $target ($mon)"; fi
       fi
       if ((ws == active)); then new_active=$target; fi
       moves=$((moves + 1))

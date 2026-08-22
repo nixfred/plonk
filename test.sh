@@ -96,11 +96,12 @@ ls "$tmpdir"/workspace-names.json.* >/dev/null 2>&1 && fail "no temp files left 
 grep -F 'rename' "$log" >/dev/null && fail "never touches Hyprland workspace names"
 pass "workspace-names.json titles travel with renumbered workspaces"
 
-# unnamed workspace landing on a slot with a stale label must clear it
-printf '%s\n' '{"1":"Dead","2":"Deader"}' >"$names"
+# an UNNAMED workspace arriving on a slot never deletes the slot's title
+# (titles are sticky; plonk must never remove a name on its own)
+printf '%s\n' '{"1":"Keep","2":"Me"}' >"$names"
 WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
-[[ $(jq -r 'has("1")' "$names") == false && $(jq -r 'has("2")' "$names") == false ]] || fail "stale labels on target slots are cleared when the arriving workspace is unnamed, got: $(cat "$names")"
-pass "stale labels are cleared when an unnamed workspace arrives"
+[[ $(jq -c . "$names") == '{"1":"Keep","2":"Me"}' ]] || fail "unnamed arrivals must not touch existing titles, got: $(cat "$names")"
+pass "plonk never deletes a title on its own"
 
 # names file missing -> no-op, no error
 : >"$log"
@@ -140,6 +141,17 @@ out=$(run_plonk)
 [[ $out == "plonk: already compact" ]] || fail "named workspace is not compacted, got: $out"
 grep -F '82345' "$log" >/dev/null && fail "does not touch named workspaces"
 pass "named workspaces are left alone"
+
+# A renamed workspace occupying id 2 must not be a landing slot (3,4 -> 1,3).
+write_stub '{"id":3}' \
+  '[{"name":"eDP-1"}]' \
+  '[{"id":2,"name":"mail","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":1},{"id":4,"name":"4","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xmail","workspace":{"id":2}},{"address":"0xa","workspace":{"id":3}},{"address":"0xb","workspace":{"id":4}}]'
+out=$(run_plonk)
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 1 })' "$log" >/dev/null || fail "packs around a named workspace occupying a low id"
+grep -E 'id = 2' "$log" >/dev/null && fail "must not land on a named workspace's id, log=$(cat "$log")"
+grep -F '0xmail' "$log" >/dev/null && fail "must not move windows onto a named workspace"
+pass "skips named-workspace ids when packing"
 
 # --- empty persistent target: window.move + pin to original monitor --------
 write_stub '{"id":3}' \
