@@ -5,6 +5,9 @@
 # and keeps its layout. Falls back to moving windows when the target ID is
 # already taken (empty persistent workspace) or change_id is unavailable.
 # Special/scratchpad workspaces (id < 1) and named workspaces are left alone.
+# If you were sitting on an empty workspace you land on the first free slot
+# after the compacted ones. Sends a desktop notification when available
+# (omarchy-notification-send / notify-send).
 #
 # Usage: plonk [-n|--dry-run]
 set -euo pipefail
@@ -71,9 +74,19 @@ renumber() { # src dst mon
   taken[$dst]=1
 }
 
+notify() { # headline
+  if command -v omarchy-notification-send >/dev/null; then
+    omarchy-notification-send --app-name plonk -g 󰕴 -u low "plonk" "$1" -t 1500 >/dev/null 2>&1 || true
+  elif command -v notify-send >/dev/null; then
+    notify-send -a plonk -u low -t 1500 "plonk" "$1" >/dev/null 2>&1 || true
+  fi
+}
+
 target=1
+active_seen=0
 while IFS=$'\t' read -r ws mon; do
   [[ $ws =~ ^[0-9]+$ ]] || continue
+  ((ws == active)) && active_seen=1
   if ((ws != target)); then
     if ((dry)); then
       echo "would move workspace $ws -> $target ($mon)"
@@ -87,7 +100,18 @@ while IFS=$'\t' read -r ws mon; do
   target=$((target + 1))
 done < <(jq -r '.[] | select(.id > 0 and .windows > 0 and ((.name // "") | test("^[0-9]+$"))) | "\(.id)\t\(.monitor)"' <<<"$workspaces" | sort -n)
 
+# Sitting on an empty workspace above the pack? Land on the first free slot.
+if ((active_seen == 0 && active > target)); then
+  new_active=$target
+  ((dry)) && echo "would move focus $active -> $target (empty workspace)"
+fi
+
 if ((dry == 0 && new_active != active)); then
   hypr_dispatch "hl.dsp.focus({ workspace = \"$new_active\" })" workspace "$new_active"
 fi
-((moves == 0)) && echo "plonk: already compact" || true
+if ((moves == 0)); then
+  echo "plonk: already compact"
+  ((dry)) || notify "already compact"
+else
+  ((dry)) || notify "moved $moves workspace$( ((moves == 1)) || echo s )"
+fi

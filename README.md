@@ -66,6 +66,8 @@ For example, workspaces 3 and 5 on `eDP-1` plus 7 and 8 on `HDMI-A-1` become 1, 
 
 - Special and scratchpad workspaces (`id < 1`) are ignored.
 - Named workspaces are ignored.
+- If you were sitting on an empty workspace above the pack, you land on the first free slot.
+- Every run sends a short desktop notification (`moved 3 workspaces` / `already compact`) via `omarchy-notification-send` or `notify-send` when present.
 - Window contents and tiling are preserved when the native ID-change dispatcher is available.
 - `--dry-run` prints the complete move plan without dispatching anything.
 
