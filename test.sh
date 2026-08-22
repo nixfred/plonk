@@ -21,6 +21,10 @@ pass "service skips startup outside Hyprland"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
+# HARD GUARD: tests must never touch the real ~/.config/omarchy/workspace-names.json.
+# (2026-08-22: a test run without this remapped Fred's live workspace titles.)
+export WORKSPACE_NAMES_FILE="$tmpdir/names-sandbox.json"
+export XDG_CONFIG_HOME="$tmpdir/xdg-sandbox"
 stub="$tmpdir/bin"
 log="$tmpdir/hyprctl.log"
 mkdir -p "$stub"
