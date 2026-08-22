@@ -4,10 +4,20 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
 PLONK="$ROOT/plonk"
+SERVICE="$ROOT/plonk.service"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 
 command -v jq >/dev/null || fail "jq is required to run tests"
+
+# A successful ExecStartPre does not skip ExecStart. ExecCondition must fail
+# outside Hyprland so systemd leaves the service inactive without starting it.
+grep -Fxq "ExecCondition=/bin/sh -c '[ \"\$XDG_CURRENT_DESKTOP\" = \"Hyprland\" ]'" "$SERVICE" ||
+  fail "service must use ExecCondition for the Hyprland desktop guard"
+if command -v systemd-analyze >/dev/null; then
+  systemd-analyze verify "$SERVICE" >/dev/null 2>&1 || fail "invalid systemd unit"
+fi
+pass "service skips startup outside Hyprland"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT

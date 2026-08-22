@@ -7,7 +7,7 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStartPre=/bin/sh -c '[ "$XDG_CURRENT_DESKTOP" = "Hyprland" ] || exit 0'
+ExecCondition=/bin/sh -c '[ "$XDG_CURRENT_DESKTOP" = "Hyprland" ]'
 ExecStart=%h/.local/bin/plonk --watch
 Restart=on-failure
 RestartSec=5
