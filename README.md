@@ -123,7 +123,7 @@ Plonk has been proposed for Omarchy as `omarchy-hyprland-workspace-compact` in [
 
 ## Auto-plonk (watch mode)
 
-`plonk --watch` stays running and closes gaps by itself: when you leave a workspace, close or move a window, or a workspace is destroyed, it compacts. It is quiet, never pulls focus off the empty workspace you are currently on, and pauses while the hyprshell/Swish switcher overlay is open. Needs `socat`.
+`plonk --watch` stays running and closes a gap when it actually appears: last window closed or moved off a workspace, a workspace destroyed, a monitor unplugged. Switching onto an empty workspace does **not** fill it — that hole closes when you leave. It is quiet, will not dump windows onto the empty workspace you are sitting on, and pauses while the hyprshell/Swish switcher overlay is open. Needs `socat`. Debounces so its own `change_id` events do not retrigger a compact.
 
 Run it as a user service (the unit is in this repo):
 

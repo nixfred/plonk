@@ -9,10 +9,11 @@
 # after the compacted ones. Sends a desktop notification when available
 # (omarchy-notification-send / notify-send).
 #
-# --watch keeps running and auto-plonks on Hyprland events (leaving a
-# workspace, closing/moving a window, a workspace being destroyed). In watch
-# mode it is quiet, never pulls focus off the empty workspace you are on,
-# and pauses while the hyprshell/Swish switcher overlay is open.
+# --watch keeps running and auto-plonks when a hole actually appears
+# (last window closed/moved off a workspace, workspace destroyed, monitor
+# unplugged) — not on every workspace switch. Quiet, never fills or steals
+# focus from the empty workspace you are sitting on, pauses while the
+# hyprshell/Swish overlay is open. Needs socat.
 #
 # Usage: plonk [-n|--dry-run] | plonk --watch [--notify]
 set -euo pipefail
@@ -23,11 +24,12 @@ dry=0
 watch=0
 quiet=0
 keep_empty_active=0
+notify_en=0
 for arg in "$@"; do
   case "$arg" in
     -n|--dry-run) dry=1 ;;
     -w|--watch) watch=1 quiet=1 keep_empty_active=1 ;;
-    --notify) quiet=0 ;;
+    --notify) notify_en=1 ;;
     -h|--help)
       echo "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]"
       exit 0
@@ -50,7 +52,7 @@ hypr_dispatch() {
 }
 
 compact() {
-  local active clients workspaces new_active moves target active_seen ws mon
+  local active clients workspaces new_active moves target active_seen ws mon active_windows skip_target
   active=$(hyprctl activeworkspace -j | jq -r '.id')
   [[ $active =~ ^-?[0-9]+$ ]] || { echo "plonk: could not read active workspace" >&2; return 1; }
 
@@ -96,17 +98,26 @@ compact() {
     fi
   }
 
+  active_windows=$(jq -r --argjson a "$active" '[.[] | select(.id == $a) | .windows] | first // 0' <<<"$workspaces")
+  skip_target=0
+  if ((keep_empty_active && active > 0 && active_windows == 0)); then
+    skip_target=$active
+  fi
+
   target=1
   active_seen=0
   while IFS=$'\t' read -r ws mon; do
     [[ $ws =~ ^[0-9]+$ ]] || continue
     ((ws == active)) && active_seen=1
+    while ((skip_target != 0 && target == skip_target)); do
+      target=$((target + 1))
+    done
     if ((ws != target)); then
       if ((dry)); then
         echo "would move workspace $ws -> $target ($mon)"
       else
         renumber "$ws" "$target" "$mon"
-        echo "moved workspace $ws -> $target ($mon)"
+        ((quiet)) || echo "moved workspace $ws -> $target ($mon)"
       fi
       if ((ws == active)); then new_active=$target; fi
       moves=$((moves + 1))
@@ -125,25 +136,54 @@ compact() {
   fi
   if ((moves == 0)); then
     ((quiet)) || echo "plonk: already compact"
-    ((dry || quiet)) || notify "already compact"
-  else
-    ((dry || quiet)) || notify "moved $moves workspace$( ((moves == 1)) || echo s )"
+    if ((dry == 0 && quiet == 0)); then notify "already compact"; fi
+  elif ((dry == 0 && (notify_en || quiet == 0))); then
+    notify "moved $moves workspace$( ((moves == 1)) || echo s )"
   fi
 }
 
 watch() {
-  local sock="${XDG_RUNTIME_DIR:-/run/user/$UID}/hypr/${HYPRLAND_INSTANCE_SIGNATURE:-}/.socket2.sock"
-  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} && -S $sock ]] || { echo "plonk: Hyprland event socket not found ($sock)" >&2; return 1; }
+  local dir inst sock
+  dir="${XDG_RUNTIME_DIR:-/run/user/$UID}/hypr"
+  inst=${HYPRLAND_INSTANCE_SIGNATURE:-}
+  sock="${dir}/${inst}/.socket2.sock"
+  if [[ -z $inst || ! -S $sock ]]; then
+    sock=$(find "$dir" -maxdepth 2 -name '.socket2.sock' -type s -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk '{print $2; exit}')
+  fi
+  [[ -n ${sock:-} && -S $sock ]] || { echo "plonk: Hyprland event socket not found (${sock:-$dir})" >&2; return 1; }
   command -v socat >/dev/null || { echo "plonk: socat not found (needed for --watch)" >&2; return 1; }
-  local paused=0 line ev
+
+  local paused=0 line ev payload need extra extra_ev
+  drain() {
+    while IFS= read -r -t 0.2 extra; do
+      extra_ev=${extra%%>>*}
+      case "$extra_ev" in
+        openlayer)  [[ ${extra#*>>} == hyprshell_switch ]] && paused=1 ;;
+        closelayer) [[ ${extra#*>>} == hyprshell_switch ]] && paused=0 ;;
+      esac
+    done
+  }
+
   while IFS= read -r line; do
     ev=${line%%>>*}
+    payload=${line#*>>}
+    need=0
     case "$ev" in
-      openlayer)  [[ ${line#*>>} == hyprshell_switch ]] && paused=1 ;;
-      closelayer) [[ ${line#*>>} == hyprshell_switch ]] && { paused=0; compact || true; } ;;
-      workspace|closewindow|movewindow|destroyworkspace|monitorremoved)
-        ((paused)) || compact || true ;;
+      openlayer)  [[ $payload == hyprshell_switch ]] && paused=1 ;;
+      closelayer)
+        if [[ $payload == hyprshell_switch ]]; then
+          paused=0
+          need=1
+        fi
+        ;;
+      closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|monitorremoved)
+        need=1 ;;
     esac
+    if ((need && paused == 0)); then
+      drain
+      ((paused)) || compact || true
+      drain
+    fi
   done < <(socat -u UNIX-CONNECT:"$sock" -)
   echo "plonk: event socket closed" >&2
   return 1

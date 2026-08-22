@@ -130,4 +130,59 @@ write_stub '{"id":null}' '[]' '[]' '[]'
 run_plonk >/dev/null 2>&1 && fail "null active id should fail" || true
 pass "rejects a null active workspace id"
 
+# --- --watch: event filtering, empty-active guard, quiet -------------------
+command -v socat >/dev/null || fail "socat is required for --watch tests"
+command -v timeout >/dev/null || fail "timeout is required for --watch tests"
+
+HOLE_GONE='[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":1},{"id":4,"name":"4","monitor":"eDP-1","windows":1}]'
+HOLE_SITTING='[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":2,"name":"2","monitor":"eDP-1","windows":0},{"id":3,"name":"3","monitor":"eDP-1","windows":1},{"id":4,"name":"4","monitor":"eDP-1","windows":1}]'
+HOLE_CLIENTS='[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":3}},{"address":"0xc","workspace":{"id":4}}]'
+
+start_event_socket() {
+  local sockpath=$1 data=$2
+  mkdir -p "$(dirname "$sockpath")"
+  rm -f "$sockpath"
+  printf '%s' "$data" >"$tmpdir/events.bin"
+  socat UNIX-LISTEN:"$sockpath",unlink-early SYSTEM:"cat '$tmpdir/events.bin'; sleep 0.7" &
+  local i
+  for i in $(seq 1 40); do
+    [[ -S $sockpath ]] && return 0
+    sleep 0.05
+  done
+  fail "event socket did not appear at $sockpath"
+}
+
+run_watch_once() {
+  XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig \
+    PATH="$stub:$PATH" timeout 3 "$PLONK" --watch 2>/dev/null || true
+}
+
+SOCK="$tmpdir/hypr/watchsig/.socket2.sock"
+
+# Switching onto an empty workspace must not compact (would dump 3 onto 2).
+write_stub '{"id":2}' '[{"name":"eDP-1"}]' "$HOLE_SITTING" "$HOLE_CLIENTS"
+start_event_socket "$SOCK" $'workspace>>2\n'
+out=$(run_watch_once)
+[[ -s $log ]] && fail "watch ignores workspace switch events, log=$(cat "$log")"
+pass "watch does not compact on workspace switch"
+
+# Leaving/destroying a workspace does compact when the active one is occupied.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+start_event_socket "$SOCK" $'destroyworkspace>>2\n'
+out=$(run_watch_once)
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
+  fail "watch compact on destroyworkspace, log=$(cat "$log")"
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "4", id = 3 })' "$log" >/dev/null ||
+  fail "watch packs the rest after destroyworkspace"
+[[ $out != *moved* ]] || fail "watch is quiet, got: $out"
+pass "watch compacts on destroyworkspace and stays quiet"
+
+# Sitting on the empty hole: compact must not fill it (skip target 2).
+write_stub '{"id":2}' '[{"name":"eDP-1"}]' "$HOLE_SITTING" "$HOLE_CLIENTS"
+start_event_socket "$SOCK" $'destroyworkspace>>9\n'
+out=$(run_watch_once)
+grep -F 'change_id' "$log" >/dev/null && fail "watch must not fill the empty active workspace, log=$(cat "$log")"
+grep -F 'window.move' "$log" >/dev/null && fail "watch must not dump windows onto the empty active workspace"
+pass "watch leaves the empty workspace you are sitting on alone"
+
 echo "all tests passed"
