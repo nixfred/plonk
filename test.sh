@@ -96,6 +96,12 @@ ls "$tmpdir"/workspace-names.json.* >/dev/null 2>&1 && fail "no temp files left 
 grep -F 'rename' "$log" >/dev/null && fail "never touches Hyprland workspace names"
 pass "workspace-names.json titles travel with renumbered workspaces"
 
+# unnamed workspace landing on a slot with a stale label must clear it
+printf '%s\n' '{"1":"Dead","2":"Deader"}' >"$names"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -r 'has("1")' "$names") == false && $(jq -r 'has("2")' "$names") == false ]] || fail "stale labels on target slots are cleared when the arriving workspace is unnamed, got: $(cat "$names")"
+pass "stale labels are cleared when an unnamed workspace arrives"
+
 # names file missing -> no-op, no error
 : >"$log"
 WORKSPACE_NAMES_FILE="$tmpdir/does-not-exist.json" run_plonk >/dev/null || fail "missing names file must not fail"
