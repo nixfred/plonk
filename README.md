@@ -50,6 +50,10 @@ For plain Hyprland `.conf`:
 bind = SUPER, MINUS, exec, plonk
 ```
 
+## Upstream
+
+Proposed for Omarchy proper as `omarchy-hyprland-workspace-compact`: [basecamp/omarchy#7727](https://github.com/basecamp/omarchy/pull/7727). Discussion: [Show and Tell #7728](https://github.com/basecamp/omarchy/discussions/7728).
+
 ## License
 
 MIT
