@@ -120,3 +120,17 @@ Plonk has been proposed for Omarchy as `omarchy-hyprland-workspace-compact` in [
 ## License
 
 [MIT](LICENSE)
+
+## Auto-plonk (watch mode)
+
+`plonk --watch` stays running and closes gaps by itself: when you leave a workspace, close or move a window, or a workspace is destroyed, it compacts. It is quiet, never pulls focus off the empty workspace you are currently on, and pauses while the hyprshell/Swish switcher overlay is open. Needs `socat`.
+
+Run it as a user service (the unit is in this repo):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nixfred/plonk/main/plonk.service -o ~/.config/systemd/user/plonk.service
+systemctl --user daemon-reload && systemctl --user enable --now plonk.service
+```
+
+The unit expects `plonk` at `~/.local/bin/plonk` (edit `ExecStart` otherwise). `plonk --watch --notify` adds the desktop notifications. Manual `plonk` and the keybind keep working alongside it.
+

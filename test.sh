@@ -37,7 +37,7 @@ run_plonk() { PATH="$stub:$PATH" "$PLONK" "$@"; }
 # --- --help / bad args never dispatch --------------------------------------
 write_stub '{"id":1}' '[]' '[]' '[]'
 out=$(run_plonk --help) || fail "--help should exit 0"
-[[ $out == "Usage: plonk [-n|--dry-run]" ]] || fail "--help prints usage"
+[[ $out == "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]" ]] || fail "--help prints usage"
 [[ ! -s $log ]] || fail "--help does not dispatch"
 run_plonk --bogus >/dev/null 2>&1 && fail "unknown flag should exit non-zero" || true
 [[ ! -s $log ]] || fail "unknown flag does not dispatch"

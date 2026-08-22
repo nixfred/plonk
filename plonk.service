@@ -1,0 +1,16 @@
+[Unit]
+Description=plonk — auto-collapse Hyprland workspaces to the lowest numbers
+PartOf=graphical-session.target
+After=graphical-session.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c '[ "$XDG_CURRENT_DESKTOP" = "Hyprland" ] || exit 0'
+ExecStart=%h/.local/bin/plonk --watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

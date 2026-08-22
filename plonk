@@ -9,25 +9,37 @@
 # after the compacted ones. Sends a desktop notification when available
 # (omarchy-notification-send / notify-send).
 #
-# Usage: plonk [-n|--dry-run]
+# --watch keeps running and auto-plonks on Hyprland events (leaving a
+# workspace, closing/moving a window, a workspace being destroyed). In watch
+# mode it is quiet, never pulls focus off the empty workspace you are on,
+# and pauses while the hyprshell/Swish switcher overlay is open.
+#
+# Usage: plonk [-n|--dry-run] | plonk --watch [--notify]
 set -euo pipefail
 
-usage() { echo "Usage: plonk [-n|--dry-run]" >&2; }
+usage() { echo "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]" >&2; }
 
 dry=0
-case "${1:-}" in
-  "") ;;
-  -n|--dry-run) dry=1 ;;
-  -h|--help)
-    echo "Usage: plonk [-n|--dry-run]"
-    exit 0
-    ;;
-  *)
-    usage
-    exit 2
-    ;;
-esac
-if (($# > 1)); then usage; exit 2; fi
+watch=0
+quiet=0
+keep_empty_active=0
+for arg in "$@"; do
+  case "$arg" in
+    -n|--dry-run) dry=1 ;;
+    -w|--watch) watch=1 quiet=1 keep_empty_active=1 ;;
+    --notify) quiet=0 ;;
+    -h|--help)
+      echo "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]"
+      exit 0
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+if ((dry && watch)); then usage; exit 2; fi
+if (($# > 2)); then usage; exit 2; fi
 
 for c in hyprctl jq; do command -v "$c" >/dev/null || { echo "plonk: $c not found" >&2; exit 1; }; done
 
@@ -37,81 +49,108 @@ hypr_dispatch() {
   hyprctl dispatch "$lua" >/dev/null 2>&1 || hyprctl dispatch "$@" >/dev/null
 }
 
-active=$(hyprctl activeworkspace -j | jq -r '.id')
-[[ $active =~ ^-?[0-9]+$ ]] || { echo "plonk: could not read active workspace" >&2; exit 1; }
+compact() {
+  local active clients workspaces new_active moves target active_seen ws mon
+  active=$(hyprctl activeworkspace -j | jq -r '.id')
+  [[ $active =~ ^-?[0-9]+$ ]] || { echo "plonk: could not read active workspace" >&2; return 1; }
 
-clients=$(hyprctl clients -j)
-workspaces=$(hyprctl workspaces -j)
-new_active=$active
-moves=0
+  clients=$(hyprctl clients -j)
+  workspaces=$(hyprctl workspaces -j)
+  new_active=$active
+  moves=0
 
-declare -A taken=()
-while IFS= read -r id; do
-  [[ $id =~ ^[0-9]+$ ]] && taken[$id]=1
-done < <(jq -r '.[] | select(.id > 0) | .id' <<<"$workspaces")
+  local -A taken=()
+  while IFS= read -r id; do
+    [[ $id =~ ^[0-9]+$ ]] && taken[$id]=1
+  done < <(jq -r '.[] | select(.id > 0) | .id' <<<"$workspaces")
 
-move_windows() { # src dst
-  local src=$1 dst=$2
-  while IFS= read -r addr; do
-    [[ -n $addr && $addr != null ]] || continue
-    hypr_dispatch "hl.dsp.window.move({ window = \"address:$addr\", workspace = \"$dst\", follow = false })" \
-      movetoworkspacesilent "$dst,address:$addr"
-  done < <(jq -r --argjson w "$src" '.[] | select(.workspace.id == $w) | .address' <<<"$clients")
-}
+  move_windows() { # src dst
+    local src=$1 dst=$2
+    while IFS= read -r addr; do
+      [[ -n $addr && $addr != null ]] || continue
+      hypr_dispatch "hl.dsp.window.move({ window = \"address:$addr\", workspace = \"$dst\", follow = false })" \
+        movetoworkspacesilent "$dst,address:$addr"
+    done < <(jq -r --argjson w "$src" '.[] | select(.workspace.id == $w) | .address' <<<"$clients")
+  }
 
-renumber() { # src dst mon
-  local src=$1 dst=$2 mon=$3
-  if [[ -z ${taken[$dst]+x} ]]; then
-    if hyprctl dispatch "hl.dsp.workspace.change_id({ workspace = \"$src\", id = $dst })" >/dev/null 2>&1; then
-      unset "taken[$src]"
-      taken[$dst]=1
-      return 0
+  renumber() { # src dst mon
+    local src=$1 dst=$2 mon=$3
+    if [[ -z ${taken[$dst]+x} ]]; then
+      if hyprctl dispatch "hl.dsp.workspace.change_id({ workspace = \"$src\", id = $dst })" >/dev/null 2>&1; then
+        unset "taken[$src]"
+        taken[$dst]=1
+        return 0
+      fi
     fi
-  fi
-  move_windows "$src" "$dst"
-  hypr_dispatch "hl.dsp.workspace.move({ workspace = \"$dst\", monitor = \"$mon\" })" \
-    moveworkspacetomonitor "$dst" "$mon"
-  taken[$dst]=1
-}
+    move_windows "$src" "$dst"
+    hypr_dispatch "hl.dsp.workspace.move({ workspace = \"$dst\", monitor = \"$mon\" })" \
+      moveworkspacetomonitor "$dst" "$mon"
+    taken[$dst]=1
+  }
 
-notify() { # headline
-  if command -v omarchy-notification-send >/dev/null; then
-    omarchy-notification-send --app-name plonk -g 󰕴 -u low "plonk" "$1" -t 1500 >/dev/null 2>&1 || true
-  elif command -v notify-send >/dev/null; then
-    notify-send -a plonk -u low -t 1500 "plonk" "$1" >/dev/null 2>&1 || true
-  fi
-}
-
-target=1
-active_seen=0
-while IFS=$'\t' read -r ws mon; do
-  [[ $ws =~ ^[0-9]+$ ]] || continue
-  ((ws == active)) && active_seen=1
-  if ((ws != target)); then
-    if ((dry)); then
-      echo "would move workspace $ws -> $target ($mon)"
-    else
-      renumber "$ws" "$target" "$mon"
-      echo "moved workspace $ws -> $target ($mon)"
+  notify() { # headline
+    if command -v omarchy-notification-send >/dev/null; then
+      omarchy-notification-send --app-name plonk -g 󰕴 -u low "plonk" "$1" -t 1500 >/dev/null 2>&1 || true
+    elif command -v notify-send >/dev/null; then
+      notify-send -a plonk -u low -t 1500 "plonk" "$1" >/dev/null 2>&1 || true
     fi
-    if ((ws == active)); then new_active=$target; fi
-    moves=$((moves + 1))
+  }
+
+  target=1
+  active_seen=0
+  while IFS=$'\t' read -r ws mon; do
+    [[ $ws =~ ^[0-9]+$ ]] || continue
+    ((ws == active)) && active_seen=1
+    if ((ws != target)); then
+      if ((dry)); then
+        echo "would move workspace $ws -> $target ($mon)"
+      else
+        renumber "$ws" "$target" "$mon"
+        echo "moved workspace $ws -> $target ($mon)"
+      fi
+      if ((ws == active)); then new_active=$target; fi
+      moves=$((moves + 1))
+    fi
+    target=$((target + 1))
+  done < <(jq -r '.[] | select(.id > 0 and .windows > 0 and ((.name // "") | test("^[0-9]+$"))) | "\(.id)\t\(.monitor)"' <<<"$workspaces" | sort -n)
+
+  # Sitting on an empty workspace above the pack? Land on the first free slot.
+  if ((keep_empty_active == 0 && active_seen == 0 && active > target)); then
+    new_active=$target
+    ((dry)) && echo "would move focus $active -> $target (empty workspace)"
   fi
-  target=$((target + 1))
-done < <(jq -r '.[] | select(.id > 0 and .windows > 0 and ((.name // "") | test("^[0-9]+$"))) | "\(.id)\t\(.monitor)"' <<<"$workspaces" | sort -n)
 
-# Sitting on an empty workspace above the pack? Land on the first free slot.
-if ((active_seen == 0 && active > target)); then
-  new_active=$target
-  ((dry)) && echo "would move focus $active -> $target (empty workspace)"
-fi
+  if ((dry == 0 && new_active != active)); then
+    hypr_dispatch "hl.dsp.focus({ workspace = \"$new_active\" })" workspace "$new_active"
+  fi
+  if ((moves == 0)); then
+    ((quiet)) || echo "plonk: already compact"
+    ((dry || quiet)) || notify "already compact"
+  else
+    ((dry || quiet)) || notify "moved $moves workspace$( ((moves == 1)) || echo s )"
+  fi
+}
 
-if ((dry == 0 && new_active != active)); then
-  hypr_dispatch "hl.dsp.focus({ workspace = \"$new_active\" })" workspace "$new_active"
-fi
-if ((moves == 0)); then
-  echo "plonk: already compact"
-  ((dry)) || notify "already compact"
+watch() {
+  local sock="${XDG_RUNTIME_DIR:-/run/user/$UID}/hypr/${HYPRLAND_INSTANCE_SIGNATURE:-}/.socket2.sock"
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} && -S $sock ]] || { echo "plonk: Hyprland event socket not found ($sock)" >&2; return 1; }
+  command -v socat >/dev/null || { echo "plonk: socat not found (needed for --watch)" >&2; return 1; }
+  local paused=0 line ev
+  while IFS= read -r line; do
+    ev=${line%%>>*}
+    case "$ev" in
+      openlayer)  [[ ${line#*>>} == hyprshell_switch ]] && paused=1 ;;
+      closelayer) [[ ${line#*>>} == hyprshell_switch ]] && { paused=0; compact || true; } ;;
+      workspace|closewindow|movewindow|destroyworkspace|monitorremoved)
+        ((paused)) || compact || true ;;
+    esac
+  done < <(socat -u UNIX-CONNECT:"$sock" -)
+  echo "plonk: event socket closed" >&2
+  return 1
+}
+
+if ((watch)); then
+  watch
 else
-  ((dry)) || notify "moved $moves workspace$( ((moves == 1)) || echo s )"
+  compact
 fi
