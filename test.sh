@@ -110,6 +110,21 @@ pass "plonk never deletes a title on its own"
 ls "$tmpdir/state-sandbox/names-backups"/workspace-names.*.json >/dev/null 2>&1 || fail "a names backup is written before any remap"
 pass "names file is backed up before plonk rewrites it"
 
+# notifications coalesce: two runs inside 2s -> one notification
+cat >"$stub/omarchy-notification-send" <<'EOF3'
+#!/bin/bash
+echo "notify $*" >>"$NOTIFY_LOG"
+EOF3
+chmod +x "$stub/omarchy-notification-send"
+nlog="$tmpdir/notify.log"; : >"$nlog"
+rm -f "$tmpdir/state-sandbox/last-notify"
+NOTIFY_LOG="$nlog" run_plonk >/dev/null
+NOTIFY_LOG="$nlog" run_plonk >/dev/null
+NOTIFY_LOG="$nlog" run_plonk >/dev/null
+[[ $(grep -c '^notify' "$nlog") == 1 ]] || fail "three runs within 2s must notify once, got: $(cat "$nlog")"
+pass "notifications coalesce to one per 2s"
+rm -f "$stub/omarchy-notification-send"
+
 # names file missing -> no-op, no error
 : >"$log"
 WORKSPACE_NAMES_FILE="$tmpdir/does-not-exist.json" run_plonk >/dev/null || fail "missing names file must not fail"

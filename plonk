@@ -132,7 +132,14 @@ compact() {
     remap_name "$src" "$dst"
   }
 
-  notify() { # headline
+  notify() { # headline — coalesced: at most one notification per 2 seconds
+    local stamp="${PLONK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/plonk}/last-notify" now last
+    now=$(date +%s)
+    if [[ -f $stamp ]]; then
+      last=$(stat -c %Y "$stamp" 2>/dev/null || echo 0)
+      ((now - last < 2)) && return 0
+    fi
+    mkdir -p "${stamp%/*}" 2>/dev/null && touch "$stamp" 2>/dev/null
     if command -v omarchy-notification-send >/dev/null; then
       omarchy-notification-send --app-name plonk -g 󰕴 -u low "plonk" "$1" -t 1500 >/dev/null 2>&1 || true
     elif command -v notify-send >/dev/null; then
