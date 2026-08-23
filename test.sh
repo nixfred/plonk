@@ -256,4 +256,27 @@ grep -F 'change_id' "$log" >/dev/null && fail "watch must not fill the empty act
 grep -F 'window.move' "$log" >/dev/null && fail "watch must not dump windows onto the empty active workspace"
 pass "watch leaves the empty workspace you are sitting on alone"
 
+# A steady stream of windowtitle events (terminal spinners, browsers) must
+# not starve the watcher: the settle window is wall-clock bounded, so the
+# compact still happens while titles keep flowing.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+: >"$log"
+rm -f "$SOCK"
+cat >"$tmpdir/flood.sh" <<'FLOOD'
+exec 2>/dev/null
+echo 'movewindow>>0xb,1'
+i=0
+while [ "$i" -lt 250 ]; do echo 'windowtitle>>0xa'; sleep 0.01; i=$((i+1)); done
+FLOOD
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sh '$tmpdir/flood.sh'" &
+flood_pid=$!
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+# The flood runs ~2.5s; the compact must land well before it ends.
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig \
+  PATH="$stub:$PATH" timeout 1.5 "$PLONK" --watch >/dev/null 2>&1 || true
+kill "$flood_pid" 2>/dev/null; wait "$flood_pid" 2>/dev/null || true
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
+  fail "watch starved by continuous windowtitle events, log=$(cat "$log")"
+pass "watch compacts while windowtitle events stream continuously"
+
 echo "all tests passed"

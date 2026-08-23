@@ -192,8 +192,19 @@ watch_connection() {
   fi
   [[ -n ${sock:-} && -S $sock ]] || { echo "plonk: Hyprland event socket not found (${sock:-$dir})" >&2; return 1; }
   local paused=0 line ev payload need extra extra_ev
+  # Settle for a bounded slice of WALL CLOCK (not "until the stream goes
+  # idle"): Hyprland streams windowtitle events continuously (terminal title
+  # spinners, browsers), so an idle-based read -t never returns and the
+  # watcher would sit here forever, never compacting.
   drain() {
-    while IFS= read -r -t 0.2 extra; do
+    local budget_us=${PLONK_SETTLE_US:-250000} now left
+    local deadline=$(( ${EPOCHREALTIME/./} + budget_us ))
+    while :; do
+      now=${EPOCHREALTIME/./}
+      left=$((deadline - now))
+      ((left > 0)) || break
+      printf -v left '%d.%06d' $((left / 1000000)) $((left % 1000000))
+      IFS= read -r -t "$left" extra || break
       extra_ev=${extra%%>>*}
       case "$extra_ev" in
         openlayer)  [[ ${extra#*>>} == hyprshell_switch ]] && paused=1 ;;
