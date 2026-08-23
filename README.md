@@ -66,7 +66,7 @@ For example, workspaces 3 and 5 on `eDP-1` plus 7 and 8 on `HDMI-A-1` become 1, 
 
 - Special and scratchpad workspaces (`id < 1`) are ignored.
 - Named workspaces are ignored.
-- Titles from the [nixfred.workspace-names](https://github.com/nixfred/larry.workspace.name) plugin (`~/.config/omarchy/workspace-names.json`, keyed by workspace id) travel with the workspace when it is renumbered — your labels never land on the wrong number. Override the path with `WORKSPACE_NAMES_FILE`.
+- Titles from the [nixfred.workspace-names](https://github.com/nixfred/workspace-names) plugin (`~/.config/omarchy/workspace-names.json`, keyed by workspace id) are **anchors**: a titled workspace is never moved, nothing is ever moved onto a titled slot, and plonk never writes that file. Unnamed workspaces compact around your named ones. Override the path with `WORKSPACE_NAMES_FILE`.
 - If you were sitting on an empty workspace above the pack, you land on the first free slot.
 - Every run sends a short desktop notification (`moved 3 workspaces` / `already compact`) via `omarchy-notification-send` or `notify-send` when present.
 - Window contents and tiling are preserved when the native ID-change dispatcher is available.

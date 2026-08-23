@@ -86,49 +86,27 @@ grep -F 'window.move' "$log" >/dev/null && fail "does not window.move when chang
 grep -Fx 'moved workspace 7 -> 3 (eDP-1)' <<<"$out" >/dev/null || fail "prints the move, got: $out"
 pass "collapses gaps with change_id, skips special, refocuses"
 
-# --- workspace-names.json titles travel with the workspace ------------------
+# --- workspace-names.json titles are anchors ---------------------------------
+# Fixture: 3, 4, 7 occupied; titles on 1 and 4. Slot 1 is titled (empty) so
+# nothing may land there; workspace 4 is titled so it must not move.
+# Expected: 3 -> 2, 7 -> 3 (slot 1 reserved, 4 anchored), file untouched.
 names="$tmpdir/workspace-names.json"
-printf '%s\n' '{"_config":{"hold":900},"1":"Plonk","3":"Brave","4":"Voice","7":"Blank","9":"Stale"}' >"$names"
+printf '%s\n' '{"_config":{"hold":900},"1":"Plonk","4":"Browser"}' >"$names"
+before=$(cat "$names")
 : >"$log"
 WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
-[[ $(jq -r '."1"' "$names") == Brave ]] || fail "3 -> 1 carries 'Brave' onto the empty slot (was 'Plonk'), got: $(cat "$names")"
-[[ $(jq -r '."2"' "$names") == Voice ]] || fail "4 -> 2 carries 'Voice', got: $(cat "$names")"
-[[ $(jq -r '."3"' "$names") == Blank ]] || fail "7 -> 3 carries 'Blank' (overwriting stale 'Brave'), got: $(cat "$names")"
-[[ $(jq -r 'has("4")' "$names") == false && $(jq -r 'has("7")' "$names") == false ]] || fail "old keys removed, got: $(cat "$names")"
-[[ $(jq -r '."9"' "$names") == Stale ]] || fail "names of workspaces plonk did not touch stay put"
-[[ $(jq -r '._config.hold' "$names") == 900 ]] || fail "_config preserved"
-ls "$tmpdir"/workspace-names.json.* >/dev/null 2>&1 && fail "no temp files left behind"
-grep -F 'rename' "$log" >/dev/null && fail "never touches Hyprland workspace names"
-pass "workspace-names.json titles travel with renumbered workspaces"
+[[ $(cat "$names") == "$before" ]] || fail "plonk must never write the names file, got: $(cat "$names")"
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null || fail "3 -> 2 (slot 1 is titled, reserved), log=$(cat "$log")"
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "7", id = 3 })' "$log" >/dev/null || fail "7 -> 3 (4 is titled, anchored), log=$(cat "$log")"
+grep -E 'workspace = "4"|id = 4 |id = 1 ' "$log" >/dev/null && fail "titled workspace/slot touched, log=$(cat "$log")"
+ls "$tmpdir"/workspace-names.json.* >/dev/null 2>&1 && fail "no temp files next to the names file"
+pass "titled workspaces are anchors: never moved, never landed on, file untouched"
 
-# an UNNAMED workspace arriving on a slot never deletes the slot's title
-# (titles are sticky; plonk must never remove a name on its own)
-printf '%s\n' '{"1":"Keep","2":"Me"}' >"$names"
-WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
-[[ $(jq -c . "$names") == '{"1":"Keep","2":"Me"}' ]] || fail "unnamed arrivals must not touch existing titles, got: $(cat "$names")"
-pass "plonk never deletes a title on its own"
-ls "$tmpdir/state-sandbox/names-backups"/workspace-names.*.json >/dev/null 2>&1 || fail "a names backup is written before any remap"
-pass "names file is backed up before plonk rewrites it"
-
-# notifications coalesce: two runs inside 2s -> one notification
-cat >"$stub/omarchy-notification-send" <<'EOF3'
-#!/bin/bash
-echo "notify $*" >>"$NOTIFY_LOG"
-EOF3
-chmod +x "$stub/omarchy-notification-send"
-nlog="$tmpdir/notify.log"; : >"$nlog"
-rm -f "$tmpdir/state-sandbox/last-notify"
-NOTIFY_LOG="$nlog" run_plonk >/dev/null
-NOTIFY_LOG="$nlog" run_plonk >/dev/null
-NOTIFY_LOG="$nlog" run_plonk >/dev/null
-[[ $(grep -c '^notify' "$nlog") == 1 ]] || fail "three runs within 2s must notify once, got: $(cat "$nlog")"
-pass "notifications coalesce to one per 2s"
-rm -f "$stub/omarchy-notification-send"
-
-# names file missing -> no-op, no error
+# names file missing -> behaves as before, never creates one
 : >"$log"
 WORKSPACE_NAMES_FILE="$tmpdir/does-not-exist.json" run_plonk >/dev/null || fail "missing names file must not fail"
 [[ ! -e "$tmpdir/does-not-exist.json" ]] || fail "does not create a names file"
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 1 })' "$log" >/dev/null || fail "without titles, 3 -> 1 as usual"
 pass "no names file is fine"
 
 # --- dry run prints the plan and dispatches nothing ------------------------

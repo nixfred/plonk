@@ -6,8 +6,10 @@
 # already taken (empty persistent workspace) or change_id is unavailable.
 # Special/scratchpad workspaces (id < 1) and named workspaces are left alone.
 # Titles from the nixfred.workspace-names plugin (workspace-names.json, keyed
-# by id) travel with the workspace when it is renumbered; override the file
-# with WORKSPACE_NAMES_FILE.
+# by id) are ANCHORS: a titled workspace is never moved, nothing is ever
+# moved onto a titled slot, and plonk never writes that file. Unnamed
+# workspaces compact around your named ones. Override the file to read with
+# WORKSPACE_NAMES_FILE.
 # If you were sitting on an empty workspace you land on the first free slot
 # after the compacted ones. Sends a desktop notification when available
 # (omarchy-notification-send / notify-send).
@@ -70,6 +72,14 @@ compact() {
   while IFS= read -r id; do
     [[ $id =~ ^[0-9]+$ ]] && taken[$id]=1
   done < <(jq -r '.[] | select(.id > 0) | .id' <<<"$workspaces")
+  # Titled slots (workspace-names.json) are anchors: never a landing slot,
+  # never moved. Read-only — plonk does not write this file.
+  local -A titled=()
+  if [[ -s $NAMES_FILE ]]; then
+    while IFS= read -r id; do
+      [[ $id =~ ^[0-9]+$ ]] && { titled[$id]=1; blocked[$id]=1; }
+    done < <(jq -r 'if type == "object" then keys[] else empty end' "$NAMES_FILE" 2>/dev/null)
+  fi
   # Named workspaces keep a numeric id. Never land on those — change_id would
   # fail (id taken, rc=0) and the window-move fallback would merge into them.
   while IFS= read -r id; do
@@ -85,51 +95,19 @@ compact() {
     done < <(jq -r --argjson w "$src" '.[] | select(.workspace.id == $w) | .address' <<<"$clients")
   }
 
-  # Snapshot the names file before plonk rewrites it (keeps the last 20 in
-  # $XDG_STATE_HOME/plonk/names-backups, or $PLONK_STATE_DIR) so a bad remap
-  # is always recoverable: ls -t ~/.local/state/plonk/names-backups | head.
-  backup_names() {
-    local dir="${PLONK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/plonk}/names-backups"
-    mkdir -p "$dir" 2>/dev/null || return 0
-    cp -p "$NAMES_FILE" "$dir/workspace-names.$(date +%Y%m%d-%H%M%S.%N).json" 2>/dev/null || return 0
-    ls -1t "$dir"/workspace-names.*.json 2>/dev/null | tail -n +21 | xargs -r rm -f --
-  }
-
-  # Carry a workspace-names.json title (nixfred.workspace-names plugin, keyed
-  # by workspace id) from src to dst so labels never land on the wrong number.
-  # Atomic write like the workspace-name tool; no-op without file/name.
-  remap_name() { # src dst
-    local src=$1 dst=$2 tmp
-    [[ -s $NAMES_FILE ]] || return 0
-    # Only a NAMED workspace carries its title along. An unnamed workspace
-    # arriving on a slot leaves whatever title is there alone — titles are
-    # sticky to the slot and plonk never deletes one on its own (2026-08-22:
-    # the "clear stale label" experiment wiped Fred's names; never again).
-    jq -e --arg s "$src" 'type == "object" and has($s)' "$NAMES_FILE" >/dev/null 2>&1 || return 0
-    backup_names
-    tmp=$(mktemp "${NAMES_FILE}.XXXXXX") || return 0
-    if jq --arg s "$src" --arg d "$dst" '.[$d] = .[$s] | del(.[$s])' "$NAMES_FILE" >"$tmp" 2>/dev/null; then
-      mv "$tmp" "$NAMES_FILE"
-    else
-      rm -f "$tmp"
-    fi
-  }
-
   renumber() { # src dst mon
     local src=$1 dst=$2 mon=$3
     if [[ -z ${taken[$dst]+x} ]]; then
       if hyprctl dispatch "hl.dsp.workspace.change_id({ workspace = \"$src\", id = $dst })" >/dev/null 2>&1; then
         unset "taken[$src]"
         taken[$dst]=1
-        remap_name "$src" "$dst"
-        return 0
+          return 0
       fi
     fi
     move_windows "$src" "$dst"
     hypr_dispatch "hl.dsp.workspace.move({ workspace = \"$dst\", monitor = \"$mon\" })" \
       moveworkspacetomonitor "$dst" "$mon"
     taken[$dst]=1
-    remap_name "$src" "$dst"
   }
 
   notify() { # headline — coalesced: at most one notification per 2 seconds
@@ -158,6 +136,10 @@ compact() {
   while IFS=$'\t' read -r ws mon; do
     [[ $ws =~ ^[0-9]+$ ]] || continue
     ((ws == active)) && active_seen=1
+    if [[ -n ${titled[$ws]+x} ]]; then  # anchored: stays exactly where it is
+      ((target == ws)) && target=$((target + 1))
+      continue
+    fi
     while ((skip_target != 0 && target == skip_target)) || [[ -n ${blocked[$target]+x} ]]; do
       target=$((target + 1))
     done
