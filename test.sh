@@ -303,4 +303,40 @@ grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$lo
   fail "watch starved by continuous windowtitle events, log=$(cat "$log")"
 pass "watch compacts while windowtitle events stream continuously"
 
+# A hole that opens during the post-compact settle window must not be lost.
+# Stateful stub: workspaces come from a file the event generator swaps while
+# the watcher is settling after a no-op compact.
+COMPACT_WS='[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":2,"name":"2","monitor":"eDP-1","windows":1}]'
+printf '%s\n' "$COMPACT_WS" >"$tmpdir/ws.json"
+printf '%s\n' "$HOLE_GONE" >"$tmpdir/ws-hole.json"
+cat >"$stub/hyprctl" <<STUB
+#!/bin/bash
+case "\$1" in
+  activeworkspace) printf '%s\\n' '{"id":1}' ;;
+  monitors) printf '%s\\n' '[{"name":"eDP-1"}]' ;;
+  workspaces) cat "$tmpdir/ws.json" ;;
+  clients) printf '%s\\n' '$HOLE_CLIENTS' ;;
+  dispatch) printf '%s\\n' "\$*" >>"$log"; echo ok ;;
+  *) echo "unexpected hyprctl \$1" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$stub/hyprctl"
+: >"$log"
+rm -f "$SOCK"
+cat >"$tmpdir/late-hole.sh" <<GEN
+exec 2>/dev/null
+echo 'destroyworkspace>>9'
+sleep 0.4
+cp '$tmpdir/ws-hole.json' '$tmpdir/ws.json'
+echo 'destroyworkspace>>2'
+sleep 1.2
+GEN
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sh '$tmpdir/late-hole.sh'" &
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig \
+  PATH="$stub:$PATH" timeout 2 "$PLONK" --watch >/dev/null 2>&1 || true
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
+  fail "hole that opened during the settle window was swallowed, log=$(cat "$log")"
+pass "watch does not lose a hole that opens while it is settling"
+
 echo "all tests passed"

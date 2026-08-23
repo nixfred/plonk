@@ -209,7 +209,7 @@ watch_connection() {
     sock=$(find "$dir" -maxdepth 2 -name '.socket2.sock' -type s -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk '{print $2; exit}')
   fi
   [[ -n ${sock:-} && -S $sock ]] || { echo "plonk: Hyprland event socket not found (${sock:-$dir})" >&2; return 1; }
-  local paused=0 line ev payload need extra extra_ev
+  local paused=0 line ev payload need extra extra_ev rounds
   # Settle for a bounded slice of WALL CLOCK (not "until the stream goes
   # idle"): Hyprland streams windowtitle events continuously (terminal title
   # spinners, browsers), so an idle-based read -t never returns and the
@@ -226,7 +226,11 @@ watch_connection() {
       extra_ev=${extra%%>>*}
       case "$extra_ev" in
         openlayer)  [[ ${extra#*>>} == hyprshell_switch ]] && paused=1 ;;
-        closelayer) [[ ${extra#*>>} == hyprshell_switch ]] && paused=0 ;;
+        closelayer) [[ ${extra#*>>} == hyprshell_switch ]] && { paused=0; need=1; } ;;
+        # A hole that opens while we are settling must not be swallowed:
+        # flag it so the loop below compacts again once this slice is over.
+        closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|monitorremoved)
+          need=1 ;;
       esac
     done
   }
@@ -246,11 +250,19 @@ watch_connection() {
       closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|monitorremoved)
         need=1 ;;
     esac
-    if ((need && paused == 0)); then
+    # Settle, compact, then settle again to swallow our own change_id
+    # events. If real triggers arrived meanwhile (drain sets need), go round
+    # again — a compact on an already-compact desktop is a cheap no-op, so
+    # this converges; bounded anyway.
+    rounds=0
+    while ((need && paused == 0 && rounds < 5)); do
+      need=0
+      rounds=$((rounds + 1))
       drain
-      ((paused)) || compact || true
+      ((paused)) && break
+      compact || true
       drain
-    fi
+    done
   done < <(socat -u UNIX-CONNECT:"$sock" -)
 }
 
