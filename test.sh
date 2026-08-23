@@ -54,10 +54,12 @@ write_stub '{"id":1}' '[]' '[]' '[]'
 out=$(run_plonk --help) || fail "--help should exit 0"
 [[ $out == "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]" ]] || fail "--help prints usage"
 [[ ! -s $log ]] || fail "--help does not dispatch"
+out=$(env -u HOME -u XDG_CONFIG_HOME PATH="$stub:$PATH" "$PLONK" --help) || fail "--help should work without HOME"
+[[ $out == "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]" ]] || fail "--help without HOME prints usage"
 run_plonk --bogus >/dev/null 2>&1 && fail "unknown flag should exit non-zero" || true
 [[ ! -s $log ]] || fail "unknown flag does not dispatch"
 run_plonk -n extra >/dev/null 2>&1 && fail "extra args should exit non-zero" || true
-pass "rejects unknown args and --help does not plonk"
+pass "rejects unknown args and --help works without a home directory"
 
 # --- already compact -------------------------------------------------------
 write_stub '{"id":2}' \
@@ -108,6 +110,14 @@ WORKSPACE_NAMES_FILE="$tmpdir/does-not-exist.json" run_plonk >/dev/null || fail 
 [[ ! -e "$tmpdir/does-not-exist.json" ]] || fail "does not create a names file"
 grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 1 })' "$log" >/dev/null || fail "without titles, 3 -> 1 as usual"
 pass "no names file is fine"
+
+# XDG_CONFIG_HOME is the standard config root and HOME may be absent in a
+# minimal service environment.
+mkdir -p "$tmpdir/xdg/omarchy"
+printf '%s\n' '{"3":"XDG title"}' >"$tmpdir/xdg/omarchy/workspace-names.json"
+env -u HOME XDG_CONFIG_HOME="$tmpdir/xdg" PATH="$stub:$PATH" "$PLONK" >/dev/null || fail "runs without HOME when XDG_CONFIG_HOME is set"
+[[ $(jq -r '."1"' "$tmpdir/xdg/omarchy/workspace-names.json") == "XDG title" ]] || fail "uses workspace names from XDG_CONFIG_HOME"
+pass "workspace title path follows XDG_CONFIG_HOME without requiring HOME"
 
 # --- dry run prints the plan and dispatches nothing ------------------------
 : >"$log"
