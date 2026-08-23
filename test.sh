@@ -216,6 +216,28 @@ grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "4", id = 3 })' "$lo
 [[ $out != *moved* ]] || fail "watch is quiet, got: $out"
 pass "watch compacts on destroyworkspace and stays quiet"
 
+# The compositor can replace its event socket without ending the graphical
+# session.  The watcher must reconnect itself rather than exit and rely on
+# systemd to notice the gap.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+: >"$log"
+rm -f "$SOCK"
+printf '%s\n' 'workspace>>2' >"$tmpdir/reconnect-1.events"
+printf '%s\n' 'destroyworkspace>>2' >"$tmpdir/reconnect-2.events"
+(
+  socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"cat '$tmpdir/reconnect-1.events'"
+  sleep 0.2
+  socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"cat '$tmpdir/reconnect-2.events'; sleep 0.5"
+) &
+server_pid=$!
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_RECONNECT_DELAY=0.1 \
+  PATH="$stub:$PATH" timeout 3 "$PLONK" --watch >/dev/null 2>&1 || true
+wait "$server_pid" 2>/dev/null || true
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
+  fail "watch reconnects after event socket replacement, log=$(cat "$log")"
+pass "watch reconnects when Hyprland replaces its event socket"
+
 # Sitting on the empty hole: compact must not fill it (skip target 2).
 write_stub '{"id":2}' '[{"name":"eDP-1"}]' "$HOLE_SITTING" "$HOLE_CLIENTS"
 start_event_socket "$SOCK" $'destroyworkspace>>9\n'
