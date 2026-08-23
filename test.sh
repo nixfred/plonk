@@ -113,10 +113,16 @@ pass "no names file is fine"
 
 # XDG_CONFIG_HOME is the standard config root and HOME may be absent in a
 # minimal service environment.
+# Titles are anchors: if the XDG-path file is honored, titled workspace 3
+# stays put (the previous test shows 3 -> 1 when no titles are found) and
+# the file is never written.
 mkdir -p "$tmpdir/xdg/omarchy"
 printf '%s\n' '{"3":"XDG title"}' >"$tmpdir/xdg/omarchy/workspace-names.json"
-env -u HOME XDG_CONFIG_HOME="$tmpdir/xdg" PATH="$stub:$PATH" "$PLONK" >/dev/null || fail "runs without HOME when XDG_CONFIG_HOME is set"
-[[ $(jq -r '."1"' "$tmpdir/xdg/omarchy/workspace-names.json") == "XDG title" ]] || fail "uses workspace names from XDG_CONFIG_HOME"
+cp "$tmpdir/xdg/omarchy/workspace-names.json" "$tmpdir/xdg-before.json"
+: >"$log"
+env -u HOME -u WORKSPACE_NAMES_FILE XDG_CONFIG_HOME="$tmpdir/xdg" PATH="$stub:$PATH" "$PLONK" >/dev/null || fail "runs without HOME when XDG_CONFIG_HOME is set"
+grep -F 'workspace = "3"' "$log" >/dev/null && fail "titled workspace 3 from XDG_CONFIG_HOME must not move, log=$(cat "$log")"
+cmp -s "$tmpdir/xdg-before.json" "$tmpdir/xdg/omarchy/workspace-names.json" || fail "names file under XDG_CONFIG_HOME must not be rewritten"
 pass "workspace title path follows XDG_CONFIG_HOME without requiring HOME"
 
 # --- dry run prints the plan and dispatches nothing ------------------------
