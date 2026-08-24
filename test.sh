@@ -453,4 +453,34 @@ grep -F 'change_id' "$log" >/dev/null || fail "hyprctl must follow the discovere
 pass "watch re-points hyprctl at the Hyprland instance it found"
 rm -rf "$tmpdir/hypr/fresh-instance"
 
+# --- watch: a window opening above a gap is a hole ---------------------------
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+# (the connect-time compact would mask this; give it an already-compact
+#  view first, then swap in the hole before the openwindow event)
+printf '%s\n' '[{"id":1,"name":"1","monitor":"eDP-1","windows":1}]' >"$tmpdir/ws.json"
+printf '%s\n' "$HOLE_GONE" >"$tmpdir/ws-hole.json"
+sed -i "s|workspaces) printf .*|workspaces) cat '$tmpdir/ws.json' ;;|" "$stub/hyprctl"
+cat >"$tmpdir/open-late.sh" <<GEN
+exec 2>/dev/null
+sleep 0.6
+cp '$tmpdir/ws-hole.json' '$tmpdir/ws.json'
+echo 'openwindow>>0xc,4,kitty,kitty'
+sleep 1
+GEN
+rm -f "$SOCK"
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sh '$tmpdir/open-late.sh'" &
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+run_watch_once >/dev/null
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
+  fail "openwindow above a gap must trigger a compact, log=$(cat "$log")"
+pass "watch compacts when a window opens above a gap"
+
+# --- watch: compacts once on connect, with no events at all ------------------
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+start_event_socket "$SOCK" ''
+run_watch_once >/dev/null
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
+  fail "pre-existing hole must be closed on connect, log=$(cat "$log")"
+pass "watch closes pre-existing holes when it connects"
+
 echo "all tests passed"

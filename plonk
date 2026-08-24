@@ -13,8 +13,9 @@
 # (omarchy-notification-send / notify-send).
 #
 # --watch keeps running and auto-plonks when a hole actually appears
-# (last window closed/moved off a workspace, workspace destroyed, monitor
-# unplugged) — not on every workspace switch. Quiet, never fills or steals
+# (window opened above a gap, last window closed/moved off a workspace,
+# workspace destroyed, monitor unplugged) and once on connect — not on
+# every workspace switch. Quiet, never fills or steals
 # focus from the empty workspace you are sitting on, pauses while the
 # hyprshell/Swish overlay is open. Needs socat.
 #
@@ -298,13 +299,20 @@ watch_connection() {
         closelayer) [[ ${extra#*>>} == hyprshell_switch ]] && { paused=0; need=1; } ;;
         # A hole that opens while we are settling must not be swallowed:
         # flag it so the loop below compacts again once this slice is over.
-        closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|monitorremoved)
+        openwindow|closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|monitorremoved)
           need=1 ;;
       esac
     done
   }
 
   need=0
+  # Is the hyprshell/Swish switcher overlay actually up right now?
+  overlay_open() {
+    hyprctl layers -j 2>/dev/null | jq -e '[.. | objects | .namespace? // empty] | any(. == "hyprshell_switch")' >/dev/null 2>&1
+  }
+  # Holes that already exist when we connect (daemon start/restart, Hyprland
+  # restart) would otherwise wait for the next unrelated event.
+  if overlay_open; then paused=1; else compact || true; fi
   while IFS= read -r line; do
     ev=${line%%>>*}
     payload=${line#*>>}
@@ -316,7 +324,7 @@ watch_connection() {
           need=1
         fi
         ;;
-      closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|monitorremoved)
+      openwindow|closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|monitorremoved)
         need=1 ;;
     esac
     # Settle, compact, then settle again to swallow our own change_id
@@ -327,7 +335,7 @@ watch_connection() {
     # overlay was up, closelayer missed). Before letting it block a compact,
     # check whether the hyprshell layer actually exists.
     if ((need && paused)); then
-      hyprctl layers -j 2>/dev/null | jq -e '[.. | objects | .namespace? // empty] | any(. == "hyprshell_switch")' >/dev/null 2>&1 || paused=0
+      overlay_open || paused=0
     fi
     rounds=0
     while ((need && paused == 0 && rounds < 5)); do
