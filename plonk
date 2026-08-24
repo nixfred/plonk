@@ -101,7 +101,7 @@ compact() {
 }
 
 compact_unlocked() {
-  local active clients workspaces monitors new_active moves target active_seen ws mon active_windows skip_target
+  local active clients workspaces monitors new_active moves target active_seen ws mon active_windows skip_target names_warned=
   active=$(hyprctl activeworkspace -j | jq -r '.id')
   [[ $active =~ ^-?[0-9]+$ ]] || { echo "plonk: could not read active workspace" >&2; return 1; }
 
@@ -157,7 +157,17 @@ compact_unlocked() {
     # arriving on a slot leaves whatever title is there alone — titles are
     # sticky to the slot and plonk never deletes one on its own (2026-08-22:
     # the "clear stale label" experiment wiped Fred's names; never again).
-    jq -e --arg s "$src" 'type == "object" and has($s)' "$NAMES_FILE" >/dev/null 2>&1 || return 0
+    if ! jq -e 'type == "object"' "$NAMES_FILE" >/dev/null 2>&1; then
+      # Unreadable/invalid names file: compact anyway, but say so — a title
+      # silently left on the old number is exactly the "names got murdered"
+      # symptom.
+      if [[ -z ${names_warned:-} ]]; then
+        echo "plonk: cannot parse $NAMES_FILE; workspace titles NOT remapped" >&2
+        names_warned=1
+      fi
+      return 0
+    fi
+    jq -e --arg s "$src" 'has($s)' "$NAMES_FILE" >/dev/null 2>&1 || return 0
     backup_names
     tmp=$(mktemp "${NAMES_FILE}.XXXXXX") || return 0
     if jq --arg s "$src" --arg d "$dst" '.[$d] = .[$s] | del(.[$s])' "$NAMES_FILE" >"$tmp" 2>/dev/null; then
@@ -260,6 +270,14 @@ watch_connection() {
     sock=$(find "$dir" -maxdepth 2 -name '.socket2.sock' -type s -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk '{print $2; exit}')
   fi
   [[ -n ${sock:-} && -S $sock ]] || { echo "plonk: Hyprland event socket not found (${sock:-$dir})" >&2; return 1; }
+  # hyprctl follows HYPRLAND_INSTANCE_SIGNATURE. If we found the socket by
+  # search (Hyprland restarted under a daemon that outlived it), point hyprctl
+  # at that same instance or every compact fails with "Couldn't connect".
+  local found_inst; found_inst=$(basename "$(dirname "$sock")")
+  if [[ -n $found_inst && $found_inst != "$inst" ]]; then
+    export HYPRLAND_INSTANCE_SIGNATURE=$found_inst
+    echo "plonk: using Hyprland instance $found_inst" >&2
+  fi
   local paused=0 line ev payload need extra extra_ev rounds
   # Settle for a bounded slice of WALL CLOCK (not "until the stream goes
   # idle"): Hyprland streams windowtitle events continuously (terminal title

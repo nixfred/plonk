@@ -34,6 +34,9 @@ write_stub() {
   local active=$1 monitors=$2 workspaces=$3 clients=$4
   cat >"$stub/hyprctl" <<EOF
 #!/bin/bash
+if [[ -n \${EXPECT_SIG:-} && \${HYPRLAND_INSTANCE_SIGNATURE:-} != "\$EXPECT_SIG" ]]; then
+  echo "Couldn't connect (stub: signature \${HYPRLAND_INSTANCE_SIGNATURE:-unset}, expected \$EXPECT_SIG)" >&2; exit 4
+fi
 case "\$1" in
   activeworkspace) printf '%s\\n' '$active' ;;
   monitors) printf '%s\\n' '$monitors' ;;
@@ -426,5 +429,28 @@ env -u HOME -u PLONK_STATE_DIR -u XDG_STATE_HOME -u XDG_CONFIG_HOME \
 grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null || fail "no-HOME run still compacts, log=$(cat "$log")"
 [[ $(jq -r '."2"' "$tmpdir/nohome-names.json") == Ride ]] || fail "no-HOME run still carries the title, got: $(cat "$tmpdir/nohome-names.json")"
 pass "runs, compacts and remaps titles with no HOME and no state directory"
+
+# --- corrupt names file: compact anyway, but warn ----------------------------
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+printf '%s' '{"3":"Ride"' >"$tmpdir/broken-names.json"
+err=$(WORKSPACE_NAMES_FILE="$tmpdir/broken-names.json" run_plonk 2>&1 >/dev/null) || fail "corrupt names file must not abort the compact"
+grep -F 'change_id' "$log" >/dev/null || fail "still compacts with a corrupt names file"
+[[ $err == *"cannot parse"* ]] || fail "must warn about the unreadable names file, stderr: $err"
+[[ $(grep -c 'cannot parse' <<<"$err") == 1 ]] || fail "warn once per compact, got: $err"
+[[ $(cat "$tmpdir/broken-names.json") == '{"3":"Ride"' ]] || fail "never rewrites a file it cannot parse"
+pass "corrupt names file: compacts, warns once, leaves the file alone"
+
+# --- watch: stale HYPRLAND_INSTANCE_SIGNATURE follows the discovered socket --
+# The daemon outlives a Hyprland restart: env still says the old instance,
+# the socket lives under the new one. hyprctl must be pointed at the new one.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+rm -rf "$tmpdir/hypr/stale-old"
+NEWSOCK="$tmpdir/hypr/fresh-instance/.socket2.sock"
+start_event_socket "$NEWSOCK" $'destroyworkspace>>2\n'
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=stale-old EXPECT_SIG=fresh-instance \
+  PATH="$stub:$PATH" timeout 3 "$PLONK" --watch >/dev/null 2>"$tmpdir/sig.err" || true
+grep -F 'change_id' "$log" >/dev/null || fail "hyprctl must follow the discovered instance, stderr: $(cat "$tmpdir/sig.err")"
+pass "watch re-points hyprctl at the Hyprland instance it found"
+rm -rf "$tmpdir/hypr/fresh-instance"
 
 echo "all tests passed"
