@@ -356,4 +356,23 @@ grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$lo
   fail "hole that opened during the settle window was swallowed, log=$(cat "$log")"
 pass "watch does not lose a hole that opens while it is settling"
 
+# Two plonks must not compact concurrently: with the lock held, a run waits
+# then skips cleanly (no dispatches), and runs normally once it is released.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+if command -v flock >/dev/null; then
+  mkdir -p "$tmpdir/state-sandbox"
+  ( flock 9; sleep 1.2 ) 9>"$tmpdir/state-sandbox/lock" &
+  locker=$!
+  sleep 0.1
+  out=$(PLONK_LOCK_WAIT=0.3 run_plonk 2>&1) || fail "locked-out plonk must exit 0, got: $out"
+  [[ $out == *"another plonk is compacting"* ]] || fail "expected the lock-skip message, got: $out"
+  [[ -s $log ]] && fail "locked-out plonk must not dispatch anything, log=$(cat "$log")"
+  wait "$locker"
+  run_plonk >/dev/null
+  grep -F 'change_id' "$log" >/dev/null || fail "plonk must compact normally after the lock is released"
+  pass "concurrent plonks serialize on the state-dir lock"
+else
+  pass "flock not present; lock test skipped"
+fi
+
 echo "all tests passed"

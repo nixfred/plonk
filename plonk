@@ -66,6 +66,19 @@ hypr_dispatch() {
 
 compact() {
   local active clients workspaces new_active moves target active_seen ws mon active_windows skip_target
+  # Only one plonk at a time: the SUPER+MINUS manual run and the --watch
+  # daemon otherwise race each other mid-compact (double renumbering,
+  # interleaved names-file rewrites). Waits briefly, then skips this round —
+  # the holder is compacting anyway.
+  if command -v flock >/dev/null; then
+    local lockdir="${PLONK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/plonk}"
+    mkdir -p "$lockdir" 2>/dev/null || true
+    { exec 9>"$lockdir/lock"; } 2>/dev/null || true
+    if ! flock -w "${PLONK_LOCK_WAIT:-3}" 9 2>/dev/null; then
+      echo "plonk: another plonk is compacting; skipping" >&2
+      return 0
+    fi
+  fi
   active=$(hyprctl activeworkspace -j | jq -r '.id')
   [[ $active =~ ^-?[0-9]+$ ]] || { echo "plonk: could not read active workspace" >&2; return 1; }
 
