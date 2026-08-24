@@ -65,7 +65,7 @@ hypr_dispatch() {
 }
 
 compact() {
-  local active clients workspaces new_active moves target active_seen ws mon active_windows skip_target
+  local active clients workspaces monitors new_active moves target active_seen ws mon active_windows skip_target
   # Only one plonk at a time: the SUPER+MINUS manual run and the --watch
   # daemon otherwise race each other mid-compact (double renumbering,
   # interleaved names-file rewrites). Waits briefly, then skips this round —
@@ -84,6 +84,7 @@ compact() {
 
   clients=$(hyprctl clients -j)
   workspaces=$(hyprctl workspaces -j)
+  monitors=$(hyprctl monitors -j 2>/dev/null || echo '[]')
   new_active=$active
   moves=0
 
@@ -91,6 +92,12 @@ compact() {
   while IFS= read -r id; do
     [[ $id =~ ^[0-9]+$ ]] && taken[$id]=1
   done < <(jq -r '.[] | select(.id > 0) | .id' <<<"$workspaces")
+  # An EMPTY workspace another monitor is showing right now is not a hole:
+  # landing there would merge windows into it and then drag it off that head.
+  while IFS= read -r id; do
+    [[ $id =~ ^[0-9]+$ && $id != "$active" ]] && blocked[$id]=1
+  done < <(jq -r --argjson ws "$workspaces" '.[]? | select(.focused != true) | .activeWorkspace.id? // empty
+      | select(. > 0) | . as $id | ($ws | map(select(.id == $id)) | first // {windows: 0}) | select(.windows == 0) | $id' <<<"$monitors" 2>/dev/null)
   # Named workspaces keep a numeric id. Never land on those — change_id would
   # fail (id taken, rc=0) and the window-move fallback would merge into them.
   while IFS= read -r id; do
@@ -271,6 +278,12 @@ watch_connection() {
     # events. If real triggers arrived meanwhile (drain sets need), go round
     # again — a compact on an already-compact desktop is a cheap no-op, so
     # this converges; bounded anyway.
+    # A pause set by openlayer can stick forever (daemon started while the
+    # overlay was up, closelayer missed). Before letting it block a compact,
+    # check whether the hyprshell layer actually exists.
+    if ((need && paused)); then
+      hyprctl layers -j 2>/dev/null | jq -e '[.. | objects | .namespace? // empty] | any(. == "hyprshell_switch")' >/dev/null 2>&1 || paused=0
+    fi
     rounds=0
     while ((need && paused == 0 && rounds < 5)); do
       need=0

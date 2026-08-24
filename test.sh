@@ -39,6 +39,7 @@ case "\$1" in
   monitors) printf '%s\\n' '$monitors' ;;
   workspaces) printf '%s\\n' '$workspaces' ;;
   clients) printf '%s\\n' '$clients' ;;
+  layers) printf '%s\\n' "\${STUB_LAYERS:-{\}}" ;;
   dispatch) printf '%s\\n' "\$*" >>"$log"; echo ok ;;
   *) echo "unexpected hyprctl \$1" >&2; exit 1 ;;
 esac
@@ -374,5 +375,32 @@ if command -v flock >/dev/null; then
 else
   pass "flock not present; lock test skipped"
 fi
+
+# --- multi-monitor: the other head's empty active workspace is not a hole --
+# HDMI-1 (unfocused) is showing empty workspace 2; eDP-1 (focused, active 1)
+# has 1 and 4 occupied. 4 must go to 3, never be merged into HDMI's 2.
+write_stub '{"id":1}' \
+  '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":1}},{"name":"HDMI-1","focused":false,"activeWorkspace":{"id":2}}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":2,"name":"2","monitor":"HDMI-1","windows":0},{"id":4,"name":"4","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xd","workspace":{"id":4}}]'
+run_plonk >/dev/null
+grep -F 'workspace = "2"' "$log" >/dev/null && fail "must not land on the workspace another monitor is showing, log=$(cat "$log")"
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "4", id = 3 })' "$log" >/dev/null || fail "4 -> 3 around the other head's empty workspace, log=$(cat "$log")"
+pass "never fills the empty workspace another monitor is displaying"
+
+# --- watch: a stale pause is checked against hyprctl layers --------------
+# openlayer with no matching closelayer, then a real hole. With no hyprshell
+# layer actually present the watcher must unpause and compact.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+start_event_socket "$SOCK" $'openlayer>>hyprshell_switch\ndestroyworkspace>>2\n'
+STUB_LAYERS='{"eDP-1":{"levels":{"1":[{"namespace":"omarchy-bar"}]}}}' run_watch_once >/dev/null
+grep -F 'change_id' "$log" >/dev/null || fail "stale pause must not block compaction when the overlay is gone, log=$(cat "$log")"
+pass "watch recovers from a stuck pause when the overlay layer is gone"
+# ...and stays paused while the overlay really is up.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+start_event_socket "$SOCK" $'openlayer>>hyprshell_switch\ndestroyworkspace>>2\n'
+STUB_LAYERS='{"eDP-1":{"levels":{"2":[{"namespace":"hyprshell_switch"}]}}}' run_watch_once >/dev/null
+grep -F 'change_id' "$log" >/dev/null && fail "must stay paused while the overlay layer exists, log=$(cat "$log")"
+pass "watch stays paused while the overlay layer is really open"
 
 echo "all tests passed"
