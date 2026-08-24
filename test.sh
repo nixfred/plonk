@@ -375,13 +375,12 @@ if command -v flock >/dev/null; then
   # A --watch daemon must release the lock between rounds, or every manual
   # plonk after its first compact is locked out forever.
   write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
-  rm -f "$SOCK"
-  socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"echo 'destroyworkspace>>2'; sleep 2.5" &
-  for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+  start_event_socket "$SOCK" $'destroyworkspace>>2\n'
   XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PATH="$stub:$PATH" \
     "$PLONK" --watch >/dev/null 2>&1 &
   watcher=$!
-  sleep 1.2   # daemon has compacted once and is idle, waiting for events
+  sleep 1.2   # daemon has compacted once by now
+  grep -F 'change_id' "$log" >/dev/null || fail "watch daemon did not compact in the lock-release test, log=$(cat "$log")"
   flock -n "$tmpdir/state-sandbox/lock" -c true || fail "watch daemon keeps holding the lock between rounds"
   kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null || true
   pass "watch daemon releases the lock after each compact"
@@ -415,5 +414,17 @@ start_event_socket "$SOCK" $'openlayer>>hyprshell_switch\ndestroyworkspace>>2\n'
 STUB_LAYERS='{"eDP-1":{"levels":{"2":[{"namespace":"hyprshell_switch"}]}}}' run_watch_once >/dev/null
 grep -F 'change_id' "$log" >/dev/null && fail "must stay paused while the overlay layer exists, log=$(cat "$log")"
 pass "watch stays paused while the overlay layer is really open"
+
+# --- no HOME and no state vars at all: still compacts, titles still travel --
+# (#1 made NAMES_FILE HOME-free; the lock/backup/notify paths crashed with
+# "HOME: unbound variable" under set -u — silently swallowed in watch mode.)
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+printf '%s\n' '{"3":"Ride"}' >"$tmpdir/nohome-names.json"
+env -u HOME -u PLONK_STATE_DIR -u XDG_STATE_HOME -u XDG_CONFIG_HOME \
+  WORKSPACE_NAMES_FILE="$tmpdir/nohome-names.json" PATH="$stub:$PATH" "$PLONK" >/dev/null 2>"$tmpdir/nohome.err" ||
+  fail "plonk must run without HOME/state vars, stderr: $(cat "$tmpdir/nohome.err")"
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null || fail "no-HOME run still compacts, log=$(cat "$log")"
+[[ $(jq -r '."2"' "$tmpdir/nohome-names.json") == Ride ]] || fail "no-HOME run still carries the title, got: $(cat "$tmpdir/nohome-names.json")"
+pass "runs, compacts and remaps titles with no HOME and no state directory"
 
 echo "all tests passed"

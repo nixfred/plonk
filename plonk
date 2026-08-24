@@ -31,6 +31,19 @@ else
   NAMES_FILE=
 fi
 
+# State dir (lock, names backups, notify stamp). Like NAMES_FILE, must work
+# without HOME (minimal service environments): empty means "no state dir",
+# and every user of it degrades gracefully.
+if [[ -n ${PLONK_STATE_DIR:-} ]]; then
+  STATE_DIR=$PLONK_STATE_DIR
+elif [[ -n ${XDG_STATE_HOME:-} ]]; then
+  STATE_DIR=$XDG_STATE_HOME/plonk
+elif [[ -n ${HOME:-} ]]; then
+  STATE_DIR=$HOME/.local/state/plonk
+else
+  STATE_DIR=
+fi
+
 usage() { echo "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]" >&2; }
 
 dry=0
@@ -72,10 +85,9 @@ hypr_dispatch() {
 # holding it between rounds).
 compact() {
   local rc=0
-  if command -v flock >/dev/null; then
-    local lockdir="${PLONK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/plonk}"
-    mkdir -p "$lockdir" 2>/dev/null || true
-    if { exec 9>"$lockdir/lock"; } 2>/dev/null; then
+  if [[ -n $STATE_DIR ]] && command -v flock >/dev/null; then
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    if { exec 9>"$STATE_DIR/lock"; } 2>/dev/null; then
       if ! flock -w "${PLONK_LOCK_WAIT:-3}" 9 2>/dev/null; then
         exec 9>&-
         echo "plonk: another plonk is compacting; skipping" >&2
@@ -128,7 +140,8 @@ compact_unlocked() {
   # $XDG_STATE_HOME/plonk/names-backups, or $PLONK_STATE_DIR) so a bad remap
   # is always recoverable: ls -t ~/.local/state/plonk/names-backups | head.
   backup_names() {
-    local dir="${PLONK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/plonk}/names-backups"
+    [[ -n $STATE_DIR ]] || return 0
+    local dir="$STATE_DIR/names-backups"
     mkdir -p "$dir" 2>/dev/null || return 0
     cp -p "$NAMES_FILE" "$dir/workspace-names.$(date +%Y%m%d-%H%M%S.%N).json" 2>/dev/null || return 0
     ls -1t "$dir"/workspace-names.*.json 2>/dev/null | tail -n +21 | xargs -r rm -f --
@@ -176,13 +189,16 @@ compact_unlocked() {
   }
 
   notify() { # headline — coalesced: at most one notification per 2 seconds
-    local stamp="${PLONK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/plonk}/last-notify" now last
-    now=$(date +%s)
-    if [[ -f $stamp ]]; then
-      last=$(stat -c %Y "$stamp" 2>/dev/null || echo 0)
-      ((now - last < 2)) && return 0
+    local stamp now last
+    if [[ -n $STATE_DIR ]]; then
+      stamp="$STATE_DIR/last-notify"
+      now=$(date +%s)
+      if [[ -f $stamp ]]; then
+        last=$(stat -c %Y "$stamp" 2>/dev/null || echo 0)
+        ((now - last < 2)) && return 0
+      fi
+      mkdir -p "$STATE_DIR" 2>/dev/null && touch "$stamp" 2>/dev/null
     fi
-    mkdir -p "${stamp%/*}" 2>/dev/null && touch "$stamp" 2>/dev/null
     if command -v omarchy-notification-send >/dev/null; then
       omarchy-notification-send --app-name plonk -g 󰕴 -u low "plonk" "$1" -t 1500 >/dev/null 2>&1 || true
     elif command -v notify-send >/dev/null; then
