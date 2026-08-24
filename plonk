@@ -64,21 +64,32 @@ hypr_dispatch() {
   hyprctl dispatch "$lua" >/dev/null 2>&1 || hyprctl dispatch "$@" >/dev/null
 }
 
+# Only one plonk at a time: the SUPER+MINUS manual run and the --watch
+# daemon otherwise race each other mid-compact (double renumbering,
+# interleaved names-file rewrites). Waits briefly, then skips this round —
+# the holder is compacting anyway. The lock lives exactly as long as one
+# compact: fd 9 is closed on the way out (a long-lived daemon must not keep
+# holding it between rounds).
 compact() {
-  local active clients workspaces monitors new_active moves target active_seen ws mon active_windows skip_target
-  # Only one plonk at a time: the SUPER+MINUS manual run and the --watch
-  # daemon otherwise race each other mid-compact (double renumbering,
-  # interleaved names-file rewrites). Waits briefly, then skips this round —
-  # the holder is compacting anyway.
+  local rc=0
   if command -v flock >/dev/null; then
     local lockdir="${PLONK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/plonk}"
     mkdir -p "$lockdir" 2>/dev/null || true
-    { exec 9>"$lockdir/lock"; } 2>/dev/null || true
-    if ! flock -w "${PLONK_LOCK_WAIT:-3}" 9 2>/dev/null; then
-      echo "plonk: another plonk is compacting; skipping" >&2
-      return 0
+    if { exec 9>"$lockdir/lock"; } 2>/dev/null; then
+      if ! flock -w "${PLONK_LOCK_WAIT:-3}" 9 2>/dev/null; then
+        exec 9>&-
+        echo "plonk: another plonk is compacting; skipping" >&2
+        return 0
+      fi
     fi
   fi
+  compact_unlocked || rc=$?
+  exec 9>&- 2>/dev/null || true
+  return "$rc"
+}
+
+compact_unlocked() {
+  local active clients workspaces monitors new_active moves target active_seen ws mon active_windows skip_target
   active=$(hyprctl activeworkspace -j | jq -r '.id')
   [[ $active =~ ^-?[0-9]+$ ]] || { echo "plonk: could not read active workspace" >&2; return 1; }
 
@@ -195,11 +206,11 @@ compact() {
     done
     if ((ws != target)); then
       if ((dry)); then
-        echo "would move workspace $ws -> $target ($mon)"
+        echo "would plonk workspace $ws -> $target ($mon)"
       else
         renumber "$ws" "$target" "$mon"
-        if ((quiet)); then echo "plonk: moved workspace $ws -> $target ($mon)" >&2
-        else echo "moved workspace $ws -> $target ($mon)"; fi
+        if ((quiet)); then echo "plonk: plonked workspace $ws -> $target ($mon)" >&2
+        else echo "plonked workspace $ws -> $target ($mon)"; fi
       fi
       if ((ws == active)); then new_active=$target; fi
       moves=$((moves + 1))
@@ -217,10 +228,10 @@ compact() {
     hypr_dispatch "hl.dsp.focus({ workspace = \"$new_active\" })" workspace "$new_active"
   fi
   if ((moves == 0)); then
-    ((quiet)) || echo "plonk: already compact"
-    if ((dry == 0 && quiet == 0)); then notify "already compact"; fi
+    ((quiet)) || echo "plonk: Already Plonked!"
+    if ((dry == 0 && quiet == 0)); then notify "Already Plonked!"; fi
   elif ((dry == 0 && (notify_en || quiet == 0))); then
-    notify "moved $moves workspace$( ((moves == 1)) || echo s )"
+    notify "Plonked $moves workspace$( ((moves == 1)) || echo s )"
   fi
 }
 

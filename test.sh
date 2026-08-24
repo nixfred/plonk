@@ -68,10 +68,10 @@ write_stub '{"id":2}' \
   '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":2,"name":"2","monitor":"eDP-1","windows":1}]' \
   '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":2}}]'
 out=$(run_plonk)
-[[ $out == "plonk: already compact" ]] || fail "already compact message, got: $out"
+[[ $out == "plonk: Already Plonked!" ]] || fail "already compact message, got: $out"
 [[ ! -s $log ]] || fail "already compact does not dispatch"
 out=$(run_plonk -n)
-[[ $out == "plonk: already compact" ]] || fail "dry-run already compact message, got: $out"
+[[ $out == "plonk: Already Plonked!" ]] || fail "dry-run already compact message, got: $out"
 pass "already compact is a no-op, including dry-run"
 
 # --- gap collapse + special skip + refocus ---------------------------------
@@ -86,7 +86,7 @@ grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "7", id = 3 })' "$lo
 grep -Fx 'dispatch hl.dsp.focus({ workspace = "3" })' "$log" >/dev/null || fail "refocuses active workspace at new number"
 grep -F '0xe' "$log" >/dev/null && fail "leaves special workspaces alone"
 grep -F 'window.move' "$log" >/dev/null && fail "does not window.move when change_id is free"
-grep -Fx 'moved workspace 7 -> 3 (eDP-1)' <<<"$out" >/dev/null || fail "prints the move, got: $out"
+grep -Fx 'plonked workspace 7 -> 3 (eDP-1)' <<<"$out" >/dev/null || fail "prints the move, got: $out"
 pass "collapses gaps with change_id, skips special, refocuses"
 
 # --- workspace-names.json titles travel with the workspace ------------------
@@ -148,7 +148,7 @@ pass "workspace title path follows XDG_CONFIG_HOME without requiring HOME"
 : >"$log"
 out=$(run_plonk --dry-run)
 [[ -s $log ]] && fail "dry run does not dispatch"
-grep -Fx 'would move workspace 7 -> 3 (eDP-1)' <<<"$out" >/dev/null || fail "dry run prints the plan, got: $out"
+grep -Fx 'would plonk workspace 7 -> 3 (eDP-1)' <<<"$out" >/dev/null || fail "dry run prints the plan, got: $out"
 pass "dry run only prints the plan"
 
 # --- multi-monitor: global IDs, no collision -------------------------------
@@ -173,7 +173,7 @@ write_stub '{"id":1}' \
   '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":82345,"name":"mail","monitor":"eDP-1","windows":1}]' \
   '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":82345}}]'
 out=$(run_plonk)
-[[ $out == "plonk: already compact" ]] || fail "named workspace is not compacted, got: $out"
+[[ $out == "plonk: Already Plonked!" ]] || fail "named workspace is not compacted, got: $out"
 grep -F '82345' "$log" >/dev/null && fail "does not touch named workspaces"
 pass "named workspaces are left alone"
 
@@ -265,7 +265,7 @@ grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$lo
   fail "watch compact on destroyworkspace, log=$(cat "$log")"
 grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "4", id = 3 })' "$log" >/dev/null ||
   fail "watch packs the rest after destroyworkspace"
-[[ $out != *moved* ]] || fail "watch is quiet, got: $out"
+[[ $out != *plonked* ]] || fail "watch is quiet, got: $out"
 pass "watch compacts on destroyworkspace and stays quiet"
 
 # The compositor can replace its event socket without ending the graphical
@@ -372,6 +372,19 @@ if command -v flock >/dev/null; then
   run_plonk >/dev/null
   grep -F 'change_id' "$log" >/dev/null || fail "plonk must compact normally after the lock is released"
   pass "concurrent plonks serialize on the state-dir lock"
+  # A --watch daemon must release the lock between rounds, or every manual
+  # plonk after its first compact is locked out forever.
+  write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+  rm -f "$SOCK"
+  socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"echo 'destroyworkspace>>2'; sleep 2.5" &
+  for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+  XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PATH="$stub:$PATH" \
+    "$PLONK" --watch >/dev/null 2>&1 &
+  watcher=$!
+  sleep 1.2   # daemon has compacted once and is idle, waiting for events
+  flock -n "$tmpdir/state-sandbox/lock" -c true || fail "watch daemon keeps holding the lock between rounds"
+  kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null || true
+  pass "watch daemon releases the lock after each compact"
 else
   pass "flock not present; lock test skipped"
 fi

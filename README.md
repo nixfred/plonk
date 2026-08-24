@@ -27,17 +27,17 @@ You open windows on workspaces 1–11, close a few, and end up working on 3, 4, 
 
 ```console
 $ plonk --dry-run
-would move workspace 3 -> 1 (eDP-1)
-would move workspace 4 -> 2 (eDP-1)
-would move workspace 5 -> 3 (eDP-1)
-would move workspace 7 -> 4 (eDP-1)
+would plonk workspace 3 -> 1 (eDP-1)
+would plonk workspace 4 -> 2 (eDP-1)
+would plonk workspace 5 -> 3 (eDP-1)
+would plonk workspace 7 -> 4 (eDP-1)
 
 $ plonk
-moved workspace 3 -> 1 (eDP-1)
+plonked workspace 3 -> 1 (eDP-1)
 ...
 
 $ plonk
-plonk: already compact
+plonk: Already Plonked!
 ```
 
 It is safe to bind and safe to mash: once the number line is compact, another run is a no-op.
@@ -68,7 +68,7 @@ For example, workspaces 3 and 5 on `eDP-1` plus 7 and 8 on `HDMI-A-1` become 1, 
 - Named workspaces are ignored.
 - Titles from the [nixfred.workspace-names](https://github.com/nixfred/workspace-names) plugin (`~/.config/omarchy/workspace-names.json`, keyed by workspace id) **travel with their workspace** when it is renumbered. The file is snapshotted before every rewrite (last 20 in `~/.local/state/plonk/names-backups/`), an unnamed workspace arriving on a slot never deletes the slot's title, and plonk never removes a title on its own. Override the path with `WORKSPACE_NAMES_FILE`.
 - If you were sitting on an empty workspace above the pack, you land on the first free slot.
-- Every run sends a short desktop notification (`moved 3 workspaces` / `already compact`) via `omarchy-notification-send` or `notify-send` when present.
+- Every run sends a short desktop notification (`Plonked 3 workspaces` / `Already Plonked!`) via `omarchy-notification-send` or `notify-send` when present.
 - Window contents and tiling are preserved when the native ID-change dispatcher is available.
 - `--dry-run` prints the complete move plan without dispatching anything.
 
