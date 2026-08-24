@@ -198,6 +198,23 @@ grep -Fx 'dispatch hl.dsp.window.move({ window = "address:0xa", workspace = "1",
 grep -Fx 'dispatch hl.dsp.workspace.move({ workspace = "1", monitor = "HDMI-1" })' "$log" >/dev/null || fail "pins dest workspace to original monitor"
 pass "falls back to window.move when the target ID is already taken"
 
+# --- change_id that fails with exit 0 -------------------------------------
+# Hyprland prints "warning: ... " and still exits 0 when change_id cannot run
+# (workspace vanished mid-compact, id grabbed by a race). Only the literal
+# "ok" is success; anything else must take the window-move fallback — and
+# never remap a title for a renumber that did not happen.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":3}}]'
+sed -i 's|dispatch) printf|dispatch) case "$2" in *change_id*) printf "%s\\n" "$*" >>"'"$log"'"; echo "warning: =[C]:-1: hl.workspace.change_id: no such workspace"; exit 0;; esac; printf|' "$stub/hyprctl"
+printf '%s\n' '{"3":"Riding"}' >"$tmpdir/liar-names.json"
+WORKSPACE_NAMES_FILE="$tmpdir/liar-names.json" run_plonk >/dev/null
+grep -Fx 'dispatch hl.dsp.window.move({ window = "address:0xb", workspace = "2", follow = false })' "$log" >/dev/null ||
+  fail "lying change_id (warning, exit 0) must fall back to window.move, log=$(cat "$log")"
+[[ $(jq -r '."2"' "$tmpdir/liar-names.json") == Riding ]] ||
+  fail "title must follow the fallback move, got: $(cat "$tmpdir/liar-names.json")"
+pass "change_id failure with exit 0 is detected; fallback moves windows and title"
+
 # --- invalid active workspace JSON ----------------------------------------
 write_stub '{"id":null}' '[]' '[]' '[]'
 run_plonk >/dev/null 2>&1 && fail "null active id should fail" || true

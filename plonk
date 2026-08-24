@@ -124,9 +124,12 @@ compact() {
   }
 
   renumber() { # src dst mon
-    local src=$1 dst=$2 mon=$3
+    local src=$1 dst=$2 mon=$3 out
     if [[ -z ${taken[$dst]+x} ]]; then
-      if hyprctl dispatch "hl.dsp.workspace.change_id({ workspace = \"$src\", id = $dst })" >/dev/null 2>&1; then
+      # hyprctl exits 0 even on failure ("warning: ... ID is taken" /
+      # "no such workspace" go to stdout); only the literal "ok" is success.
+      out=$(hyprctl dispatch "hl.dsp.workspace.change_id({ workspace = \"$src\", id = $dst })" 2>/dev/null || true)
+      if [[ $out == ok ]]; then
         unset "taken[$src]"
         taken[$dst]=1
         remap_name "$src" "$dst"
@@ -137,6 +140,7 @@ compact() {
     hypr_dispatch "hl.dsp.workspace.move({ workspace = \"$dst\", monitor = \"$mon\" })" \
       moveworkspacetomonitor "$dst" "$mon"
     taken[$dst]=1
+    unset "taken[$src]"   # src is empty now; a later pass may change_id onto it
     remap_name "$src" "$dst"
   }
 
@@ -216,9 +220,9 @@ watch_connection() {
   # watcher would sit here forever, never compacting.
   drain() {
     local budget_us=${PLONK_SETTLE_US:-250000} now left
-    local deadline=$(( ${EPOCHREALTIME/./} + budget_us ))
+    local deadline=$(( ${EPOCHREALTIME//[.,]/} + budget_us ))
     while :; do
-      now=${EPOCHREALTIME/./}
+      now=${EPOCHREALTIME//[.,]/}
       left=$((deadline - now))
       ((left > 0)) || break
       printf -v left '%d.%06d' $((left / 1000000)) $((left % 1000000))
@@ -235,10 +239,10 @@ watch_connection() {
     done
   }
 
+  need=0
   while IFS= read -r line; do
     ev=${line%%>>*}
     payload=${line#*>>}
-    need=0
     case "$ev" in
       openlayer)  [[ $payload == hyprshell_switch ]] && paused=1 ;;
       closelayer)
