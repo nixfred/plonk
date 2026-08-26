@@ -72,6 +72,17 @@ if (($# > 2)); then usage; exit 2; fi
 
 for c in hyprctl jq; do command -v "$c" >/dev/null || { echo "plonk: $c not found" >&2; exit 1; }; done
 
+# Watch-mode bookkeeping. A manual run ignores these, but the daemon uses
+# them to distinguish events produced by its own window-move fallback from a
+# real second hole that arrives while it is settling.
+COMPACT_LOCK_SKIPPED=0
+declare -A OWN_MOVES=() OWN_DESTROYS=()
+
+clear_own_events() {
+  OWN_MOVES=()
+  OWN_DESTROYS=()
+}
+
 hypr_dispatch() {
   local lua="$1"
   shift
@@ -86,11 +97,13 @@ hypr_dispatch() {
 # holding it between rounds).
 compact() {
   local rc=0
+  COMPACT_LOCK_SKIPPED=0
   if [[ -n $STATE_DIR ]] && command -v flock >/dev/null; then
     mkdir -p "$STATE_DIR" 2>/dev/null || true
     if { exec 9>"$STATE_DIR/lock"; } 2>/dev/null; then
       if ! flock -w "${PLONK_LOCK_WAIT:-3}" 9 2>/dev/null; then
         exec 9>&-
+        COMPACT_LOCK_SKIPPED=1
         echo "plonk: another plonk is compacting; skipping" >&2
         return 0
       fi
@@ -102,13 +115,19 @@ compact() {
 }
 
 compact_unlocked() {
-  local active clients workspaces monitors new_active moves target active_seen ws mon active_windows skip_target names_warned=
+  local active snapshot_active current_active clients workspaces monitors new_active moves target active_seen ws mon active_windows skip_target names_warned=
   active=$(hyprctl activeworkspace -j | jq -r '.id')
   [[ $active =~ ^-?[0-9]+$ ]] || { echo "plonk: could not read active workspace" >&2; return 1; }
 
   clients=$(hyprctl clients -j)
   workspaces=$(hyprctl workspaces -j)
   monitors=$(hyprctl monitors -j 2>/dev/null || echo '[]')
+  # The four hyprctl reads are not atomic. Re-sample focus after the slower
+  # snapshots so the empty-active guard is based on where the user is now,
+  # not where they were before clients/workspaces were collected.
+  snapshot_active=$(hyprctl activeworkspace -j | jq -r '.id')
+  [[ $snapshot_active =~ ^-?[0-9]+$ ]] || { echo "plonk: could not re-read active workspace" >&2; return 1; }
+  active=$snapshot_active
   new_active=$active
   moves=0
 
@@ -130,8 +149,10 @@ compact_unlocked() {
 
   move_windows() { # src dst
     local src=$1 dst=$2
+    OWN_DESTROYS[$src]=1
     while IFS= read -r addr; do
       [[ -n $addr && $addr != null ]] || continue
+      OWN_MOVES["$addr,$dst"]=1
       hypr_dispatch "hl.dsp.window.move({ window = \"address:$addr\", workspace = \"$dst\", follow = false })" \
         movetoworkspacesilent "$dst,address:$addr"
     done < <(jq -r --argjson w "$src" '.[] | select(.workspace.id == $w) | .address' <<<"$clients")
@@ -252,7 +273,13 @@ compact_unlocked() {
   fi
 
   if ((dry == 0 && new_active != active)); then
-    hypr_dispatch "hl.dsp.focus({ workspace = \"$new_active\" })" workspace "$new_active"
+    # change_id normally carries focus with the workspace. The explicit focus
+    # is only needed for the window-move fallback, and must never pull a user
+    # back after they switched during this compact.
+    current_active=$(hyprctl activeworkspace -j | jq -r '.id')
+    if [[ $current_active == "$active" ]]; then
+      hypr_dispatch "hl.dsp.focus({ workspace = \"$new_active\" })" workspace "$new_active"
+    fi
   fi
   if ((moves == 0)); then
     ((quiet)) || echo "plonk: Already Plonked!"
@@ -263,12 +290,26 @@ compact_unlocked() {
 }
 
 watch_connection() {
-  local dir inst sock
+  local dir inst sock candidate event_fd
   dir="${XDG_RUNTIME_DIR:-/run/user/$UID}/hypr"
   inst=${HYPRLAND_INSTANCE_SIGNATURE:-}
   sock="${dir}/${inst}/.socket2.sock"
-  if [[ -z $inst || ! -S $sock ]]; then
-    sock=$(find "$dir" -maxdepth 2 -name '.socket2.sock' -type s -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk '{print $2; exit}')
+
+  socket_live() {
+    local candidate_sock=$1 candidate_inst
+    candidate_inst=$(basename "$(dirname "$candidate_sock")")
+    HYPRLAND_INSTANCE_SIGNATURE=$candidate_inst hyprctl monitors -j >/dev/null 2>&1
+  }
+
+  if [[ -z $inst || ! -S $sock ]] || ! socket_live "$sock"; then
+    sock=
+    while IFS= read -r candidate; do
+      candidate=${candidate#* }
+      if [[ -S $candidate ]] && socket_live "$candidate"; then
+        sock=$candidate
+        break
+      fi
+    done < <(find "$dir" -maxdepth 2 -name '.socket2.sock' -type s -printf '%T@ %p\n' 2>/dev/null | sort -nr)
   fi
   [[ -n ${sock:-} && -S $sock ]] || { echo "plonk: Hyprland event socket not found (${sock:-$dir})" >&2; return 1; }
   # hyprctl follows HYPRLAND_INSTANCE_SIGNATURE. If we found the socket by
@@ -279,7 +320,39 @@ watch_connection() {
     export HYPRLAND_INSTANCE_SIGNATURE=$found_inst
     echo "plonk: using Hyprland instance $found_inst" >&2
   fi
-  local paused=0 line ev payload need extra extra_ev rounds
+  local paused=0 line ev payload need extra extra_ev extra_payload rounds move_addr move_rest move_dst destroy_id
+
+  own_trigger() {
+    local event=$1 event_payload=$2
+    case "$event" in
+      movewindow)
+        [[ -n ${OWN_MOVES[$event_payload]+x} ]]
+        ;;
+      movewindowv2)
+        move_addr=${event_payload%%,*}
+        move_rest=${event_payload#*,}
+        move_dst=${move_rest%%,*}
+        [[ -n ${OWN_MOVES["$move_addr,$move_dst"]+x} ]]
+        ;;
+      destroyworkspace)
+        [[ -n ${OWN_DESTROYS[$event_payload]+x} ]]
+        ;;
+      destroyworkspacev2)
+        destroy_id=${event_payload%%,*}
+        [[ -n ${OWN_DESTROYS[$destroy_id]+x} ]]
+        ;;
+      *) return 1 ;;
+    esac
+  }
+
+  is_compact_trigger() {
+    case "$1" in
+      openwindow|closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|moveworkspace|moveworkspacev2|monitoradded|monitorremoved|configreloaded)
+        return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
   # Settle for a bounded slice of WALL CLOCK (not "until the stream goes
   # idle"): Hyprland streams windowtitle events continuously (terminal title
   # spinners, browsers), so an idle-based read -t never returns and the
@@ -292,15 +365,17 @@ watch_connection() {
       left=$((deadline - now))
       ((left > 0)) || break
       printf -v left '%d.%06d' $((left / 1000000)) $((left % 1000000))
-      IFS= read -r -t "$left" extra || break
+      IFS= read -r -t "$left" -u "$event_fd" extra || break
       extra_ev=${extra%%>>*}
+      extra_payload=${extra#*>>}
       case "$extra_ev" in
-        openlayer)  [[ ${extra#*>>} == hyprshell_switch ]] && paused=1 ;;
-        closelayer) [[ ${extra#*>>} == hyprshell_switch ]] && { paused=0; need=1; } ;;
+        openlayer)  [[ $extra_payload == hyprshell_switch ]] && paused=1 ;;
+        closelayer) [[ $extra_payload == hyprshell_switch ]] && { paused=0; need=1; } ;;
         # A hole that opens while we are settling must not be swallowed:
         # flag it so the loop below compacts again once this slice is over.
-        openwindow|closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|monitorremoved)
-          need=1 ;;
+        *)
+          if is_compact_trigger "$extra_ev" && ! own_trigger "$extra_ev" "$extra_payload"; then need=1; fi
+          ;;
       esac
     done
   }
@@ -310,10 +385,33 @@ watch_connection() {
   overlay_open() {
     hyprctl layers -j 2>/dev/null | jq -e '[.. | objects | .namespace? // empty] | any(. == "hyprshell_switch")' >/dev/null 2>&1
   }
+  # Connect before the initial compact. Events that land during that first
+  # snapshot are buffered on this fd and cannot fall through a startup gap.
+  exec {event_fd}< <(socat -u UNIX-CONNECT:"$sock" -)
+
+  run_pending_compacts() {
+    if ((need && paused)); then overlay_open || paused=0; fi
+    rounds=0
+    while ((need && paused == 0 && rounds < 5)); do
+      need=0
+      rounds=$((rounds + 1))
+      clear_own_events
+      # Compact immediately. The old pre-drain imposed a guaranteed 250 ms
+      # delay; the post-drain still catches any event that races this snapshot
+      # and schedules another bounded round.
+      compact || true
+      ((COMPACT_LOCK_SKIPPED)) && need=1
+      drain
+      clear_own_events
+    done
+  }
+
   # Holes that already exist when we connect (daemon start/restart, Hyprland
   # restart) would otherwise wait for the next unrelated event.
-  if overlay_open; then paused=1; else compact || true; fi
-  while IFS= read -r line; do
+  need=1
+  if overlay_open; then paused=1; else run_pending_compacts; fi
+
+  while IFS= read -r -u "$event_fd" line; do
     ev=${line%%>>*}
     payload=${line#*>>}
     case "$ev" in
@@ -324,29 +422,16 @@ watch_connection() {
           need=1
         fi
         ;;
-      openwindow|closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|monitorremoved)
-        need=1 ;;
+      *)
+        if is_compact_trigger "$ev" && ! own_trigger "$ev" "$payload"; then need=1; fi
+        ;;
     esac
-    # Settle, compact, then settle again to swallow our own change_id
-    # events. If real triggers arrived meanwhile (drain sets need), go round
-    # again — a compact on an already-compact desktop is a cheap no-op, so
-    # this converges; bounded anyway.
     # A pause set by openlayer can stick forever (daemon started while the
     # overlay was up, closelayer missed). Before letting it block a compact,
     # check whether the hyprshell layer actually exists.
-    if ((need && paused)); then
-      overlay_open || paused=0
-    fi
-    rounds=0
-    while ((need && paused == 0 && rounds < 5)); do
-      need=0
-      rounds=$((rounds + 1))
-      drain
-      ((paused)) && break
-      compact || true
-      drain
-    done
-  done < <(socat -u UNIX-CONNECT:"$sock" -)
+    run_pending_compacts
+  done
+  exec {event_fd}<&-
 }
 
 watch() {

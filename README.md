@@ -124,7 +124,7 @@ Plonk has been proposed for Omarchy as `omarchy-hyprland-workspace-compact` in [
 
 ## Auto-plonk (watch mode)
 
-`plonk --watch` stays running and closes a gap when it actually appears: a window opened above a gap, last window closed or moved off a workspace, a workspace destroyed, a monitor unplugged — plus once right after it connects, so holes that predate the daemon (or survived a Hyprland restart) are closed too. Switching onto an empty workspace does **not** fill it — that hole closes when you leave. It is quiet, will not dump windows onto the empty workspace you are sitting on (on any monitor), pauses while the hyprshell/Swish switcher overlay is open (verified against `hyprctl layers`, so a missed close event cannot wedge it), follows the Hyprland instance it finds if the compositor restarted underneath it, and takes a lock in `~/.local/state/plonk/` so a manual `plonk` never races it. Needs `socat`. Settles for ~250 ms of wall clock around each compact (`PLONK_SETTLE_US`) — a continuous stream of `windowtitle` events from terminal spinners cannot starve it, and a hole that opens during the settle is not lost.
+`plonk --watch` stays running and closes a gap when it actually appears: a window opened above a gap, last window closed or moved off a workspace, a workspace destroyed or moved, a monitor added or unplugged, or Hyprland reloaded — plus once right after it connects, so holes that predate the daemon (or survived a Hyprland restart) are closed too. Switching onto an empty workspace does **not** fill it — that hole closes when you leave, because filling the workspace under you would pull another workspace's windows into view. It is quiet, will not dump windows onto the empty workspace you are sitting on (on any monitor), pauses while the hyprshell/Swish switcher overlay is open (verified against `hyprctl layers`, so a missed close event cannot wedge it), follows a live Hyprland instance if the compositor restarted underneath it, and takes a lock in `~/.local/state/plonk/` so a manual `plonk` never races it. Needs `socat`. A trigger compacts immediately, then watches a bounded ~250 ms wall-clock settle window (`PLONK_SETTLE_US`) for a second real change. Events emitted by Plonk's own fallback are ignored, continuous `windowtitle` events cannot starve it, and a hole that opens during the settle is not lost.
 
 Run it as a user service (the unit is in this repo):
 
@@ -134,4 +134,3 @@ systemctl --user daemon-reload && systemctl --user enable --now plonk.service
 ```
 
 The unit expects `plonk` at `~/.local/bin/plonk` (edit `ExecStart` otherwise). `plonk --watch --notify` adds the desktop notifications. Manual `plonk` and the keybind keep working alongside it.
-

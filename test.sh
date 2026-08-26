@@ -92,6 +92,36 @@ grep -F 'window.move' "$log" >/dev/null && fail "does not window.move when chang
 grep -Fx 'plonked workspace 7 -> 3 (eDP-1)' <<<"$out" >/dev/null || fail "prints the move, got: $out"
 pass "collapses gaps with change_id, skips special, refocuses"
 
+# If focus changes after the snapshot but before the final refocus, never pull
+# the user back to the workspace plonk started on.
+focus_calls="$tmpdir/focus-active.calls"
+printf '0\n' >"$focus_calls"
+cat >"$stub/hyprctl" <<STUB
+#!/bin/bash
+case "\$1" in
+  activeworkspace)
+    n=\$(cat "$focus_calls"); n=\$((n + 1)); printf '%s\n' "\$n" >"$focus_calls"
+    if ((n <= 2)); then printf '%s\n' '{"id":7}'; else printf '%s\n' '{"id":9}'; fi ;;
+  monitors) printf '%s\n' '[{"name":"eDP-1"}]' ;;
+  workspaces) printf '%s\n' '[{"id":3,"name":"3","monitor":"eDP-1","windows":1},{"id":7,"name":"7","monitor":"eDP-1","windows":1}]' ;;
+  clients) printf '%s\n' '[{"address":"0xa","workspace":{"id":3}},{"address":"0xb","workspace":{"id":7}}]' ;;
+  dispatch) printf '%s\n' "\$*" >>"$log"; echo ok ;;
+  *) echo "unexpected hyprctl \$1" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$stub/hyprctl"
+: >"$log"
+run_plonk >/dev/null
+grep -F 'change_id' "$log" >/dev/null || fail "focus-race fixture must compact, log=$(cat "$log")"
+grep -F 'hl.dsp.focus' "$log" >/dev/null && fail "must not steal focus after the user switched, log=$(cat "$log")"
+pass "does not refocus from a stale active-workspace snapshot"
+
+# Restore the gap fixture used by the title-remap checks below.
+write_stub '{"id":7}' \
+  '[{"name":"eDP-1"}]' \
+  '[{"id":7,"name":"7","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":2},{"id":4,"name":"4","monitor":"eDP-1","windows":1},{"id":-99,"name":"special:scratchpad","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":3}},{"address":"0xb","workspace":{"id":3}},{"address":"0xc","workspace":{"id":4}},{"address":"0xd","workspace":{"id":7}},{"address":"0xe","workspace":{"id":-99}}]'
+
 # --- workspace-names.json titles travel with the workspace ------------------
 names="$tmpdir/workspace-names.json"
 printf '%s\n' '{"_config":{"hold":900},"1":"Plonk","3":"Brave","4":"Voice","7":"Blank","9":"Stale"}' >"$names"
@@ -482,5 +512,86 @@ run_watch_once >/dev/null
 grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
   fail "pre-existing hole must be closed on connect, log=$(cat "$log")"
 pass "watch closes pre-existing holes when it connects"
+
+# A trigger received after the connect-time settle must compact immediately,
+# not sit through another full pre-compact settle. With a deliberately huge
+# 900 ms settle, the old watcher missed this 1.45 s deadline.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$COMPACT_WS" "$HOLE_CLIENTS"
+printf '%s\n' "$COMPACT_WS" >"$tmpdir/ws.json"
+printf '%s\n' "$HOLE_GONE" >"$tmpdir/ws-hole.json"
+sed -i "s|workspaces) printf .*|workspaces) cat '$tmpdir/ws.json' ;;|" "$stub/hyprctl"
+cat >"$tmpdir/immediate-trigger.sh" <<GEN
+exec 2>/dev/null
+sleep 1
+cp '$tmpdir/ws-hole.json' '$tmpdir/ws.json'
+echo 'moveworkspacev2>>3,3,eDP-1'
+sleep 1
+GEN
+rm -f "$SOCK"
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sh '$tmpdir/immediate-trigger.sh'" &
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_SETTLE_US=900000 \
+  PATH="$stub:$PATH" timeout 1.45 "$PLONK" --watch >/dev/null 2>&1 || true
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
+  fail "watch must compact before a second pre-settle budget elapses, log=$(cat "$log")"
+pass "watch compacts first and settles afterward"
+
+# The window-move fallback emits movewindow + destroyworkspace events of its
+# own. They must be swallowed rather than causing a redundant no-op round.
+active_file="$tmpdir/self-event-active.json"
+active_calls="$tmpdir/self-event-active.calls"
+printf '%s\n' '{"id":1}' >"$active_file"
+printf '0\n' >"$active_calls"
+printf '%s\n' "$COMPACT_WS" >"$tmpdir/ws.json"
+printf '%s\n' '[{"id":1,"name":"1","monitor":"eDP-1","windows":0},{"id":3,"name":"3","monitor":"eDP-1","windows":1}]' >"$tmpdir/ws-fallback.json"
+cat >"$stub/hyprctl" <<STUB
+#!/bin/bash
+case "\$1" in
+  activeworkspace) n=\$(cat "$active_calls"); printf '%s\n' "\$((n + 1))" >"$active_calls"; cat "$active_file" ;;
+  monitors) printf '%s\n' '[{"name":"eDP-1"}]' ;;
+  workspaces) cat "$tmpdir/ws.json" ;;
+  clients) printf '%s\n' '[{"address":"0xa","workspace":{"id":3}}]' ;;
+  layers) printf '%s\n' '{}' ;;
+  dispatch) printf '%s\n' "\$*" >>"$log"; echo ok ;;
+  *) echo "unexpected hyprctl \$1" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$stub/hyprctl"
+: >"$log"
+cat >"$tmpdir/self-events.sh" <<GEN
+exec 2>/dev/null
+sleep 0.3
+printf '%s\n' '{"id":3}' >'$active_file'
+cp '$tmpdir/ws-fallback.json' '$tmpdir/ws.json'
+echo 'destroyworkspace>>2'
+sleep 0.06
+echo 'movewindow>>0xa,1'
+echo 'movewindowv2>>0xa,1,1'
+echo 'destroyworkspace>>3'
+echo 'destroyworkspacev2>>3,3'
+sleep 0.5
+GEN
+rm -f "$SOCK"
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sh '$tmpdir/self-events.sh'" &
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_SETTLE_US=100000 \
+  PATH="$stub:$PATH" timeout 1.1 "$PLONK" --watch >/dev/null 2>&1 || true
+[[ $(grep -c 'hl.dsp.window.move' "$log") == 1 ]] || fail "own fallback events caused another move round, log=$(cat "$log")"
+[[ $(cat "$active_calls") == 5 ]] || fail "own fallback events caused another snapshot, active calls=$(cat "$active_calls"), log=$(cat "$log")"
+pass "watch ignores the fallback events it emits itself"
+
+# If a manual plonk owns the lock, the watcher must retain its pending round
+# and retry after the lock is released even when no second event arrives.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+start_event_socket "$SOCK" ''
+( flock 9; sleep 0.18 ) 9>"$tmpdir/state-sandbox/lock" &
+locker=$!
+sleep 0.02
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_LOCK_WAIT=0.02 PLONK_SETTLE_US=50000 \
+  PATH="$stub:$PATH" timeout 1 "$PLONK" --watch >/dev/null 2>&1 || true
+wait "$locker" 2>/dev/null || true
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
+  fail "watch dropped its round while the lock was busy, log=$(cat "$log")"
+pass "watch retries a compact skipped by the lock"
 
 echo "all tests passed"
