@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.nixfred.plonk",
+  "name": "Plonk",
+  "version": "1.0.0",
+  "author": "Fred Nix",
+  "description": "Packs occupied numeric Hyprland workspaces into 1…N as gaps appear, preserving order, tiling, monitor placement, and focus.",
+  "kinds": ["service"],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

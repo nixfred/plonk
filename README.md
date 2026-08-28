@@ -14,7 +14,7 @@ One keystroke turns a scattered workspace number line into `1…N`—without rea
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nixfred/plonk/main/plonk -o ~/.local/bin/plonk && chmod +x ~/.local/bin/plonk
+omarchy plugin add https://github.com/nixfred/plonk.git --enable
 ```
 
 </div>
@@ -72,7 +72,34 @@ For example, workspaces 3 and 5 on `eDP-1` plus 7 and 8 on `HDMI-A-1` become 1, 
 - Window contents and tiling are preserved when the native ID-change dispatcher is available.
 - `--dry-run` prints the complete move plan without dispatching anything.
 
-## Install
+## Install as an Omarchy plugin
+
+Plonk is a headless Omarchy service plugin: enabling it starts the bundled watcher inside `omarchy-shell`, and disabling or removing it stops the watcher. It has no panel or bar widget because there is nothing to operate—the service quietly closes workspace-number gaps as they appear.
+
+It requires Omarchy Quattro with `hyprctl`, `jq`, `socat`, and `setpriv`. Omarchy supplies those commands; Plonk does not download dependencies, run an install hook, request privileges, or overwrite your Hyprland configuration.
+
+```bash
+omarchy plugin add https://github.com/nixfred/plonk.git --enable
+```
+
+Check the service or trigger an immediate compact through the shell:
+
+```bash
+omarchy-shell plonk status
+omarchy-shell plonk compact
+```
+
+Remove it cleanly with:
+
+```bash
+omarchy plugin remove io.github.nixfred.plonk
+```
+
+Removal disables the service before deleting its checkout. Plonk leaves only runtime state in `~/.local/state/plonk/`: a lock file, a notification timestamp, and—when the workspace-names integration is used—up to 20 safety backups. Those files are inert and may be deleted manually if you do not want the recovery history.
+
+## Install the standalone command
+
+For plain Hyprland, older Omarchy releases, or a manual keybinding instead of an always-on plugin, install the script directly. Do not run the plugin watcher and the standalone systemd service at the same time.
 
 Plonk needs only `hyprctl` and `jq`; both ship with Omarchy.
 
