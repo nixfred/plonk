@@ -644,4 +644,28 @@ kill "$listener" 2>/dev/null || true
 wait "$listener" 2>/dev/null || true
 pass "stopping the watcher kills its socat reader"
 
+# ...and dies OF the signal rather than exiting 143: systemd marks a unit
+# that exits with code 143 after `systemctl stop` as failed, while a SIGTERM
+# death is a clean stop. bash's $? cannot tell the two apart; waitpid can.
+if command -v python3 >/dev/null; then
+  rm -f "$SOCK"
+  socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sleep 4" &
+  listener=$!
+  for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+  how=$(XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_SETTLE_US=50000 \
+    PATH="$stub:$PATH" python3 -c '
+import signal, subprocess, sys, time
+p = subprocess.Popen([sys.argv[1], "--watch"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(0.6)
+p.send_signal(signal.SIGTERM)
+rc = p.wait(timeout=3)
+print("signal" if rc < 0 else "exit %d" % rc)
+' "$PLONK")
+  pkill -f "UNIX-CONNECT:$SOCK" 2>/dev/null || true
+  kill "$listener" 2>/dev/null || true
+  wait "$listener" 2>/dev/null || true
+  [[ $how == signal ]] || fail "watcher must die of SIGTERM (clean stop), got: $how"
+  pass "stopped watcher dies of SIGTERM, not exit 143"
+fi
+
 echo "all tests passed"

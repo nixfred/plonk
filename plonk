@@ -458,9 +458,12 @@ kill_socat() {
 
 watch() {
   command -v socat >/dev/null || { echo "plonk: socat not found (needed for --watch)" >&2; return 1; }
-  trap 'kill_socat; exit 143' TERM
-  trap 'kill_socat; exit 130' INT
-  trap 'kill_socat; exit 129' HUP
+  # Clean up, then die of the same signal (not `exit 143`): systemd and
+  # Quickshell read "killed by SIGTERM" as a clean stop, but an exit CODE
+  # of 143 after `systemctl stop` marks the unit failed.
+  trap 'kill_socat; trap - TERM; kill -TERM $$' TERM
+  trap 'kill_socat; trap - INT; kill -INT $$' INT
+  trap 'kill_socat; trap - HUP; kill -HUP $$' HUP
   trap kill_socat EXIT
 
   while true; do
