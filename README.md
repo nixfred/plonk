@@ -95,7 +95,7 @@ Remove it cleanly with:
 omarchy plugin remove io.github.nixfred.plonk
 ```
 
-Removal disables the service before deleting its checkout, and the watcher takes its `socat` event reader down with it. Plonk leaves only runtime state in `~/.local/state/plonk/`: a lock file, a notification timestamp (only if you used `--notify`), and—when the workspace-names integration is used—up to 20 safety backups. Those files are inert and may be deleted manually if you do not want the recovery history.
+Removal disables the service before deleting its checkout, and the watcher takes its `socat` event reader down with it. Plonk leaves only runtime state in `~/.local/state/plonk/`: a notification timestamp (only if you used `--notify`) and—when the workspace-names integration is used—up to 20 safety backups. The run lock is taken on that directory itself, so no lock file is written. Those files are inert and may be deleted manually if you do not want the recovery history. The names file is only touched when it is a plain regular file under 1 MiB; a symlink, FIFO, or oversized file is reported and left alone.
 
 ## Install the standalone command
 
@@ -103,9 +103,14 @@ For plain Hyprland, older Omarchy releases, or a manual keybinding instead of an
 
 Plonk needs only `hyprctl` and `jq`; both ship with Omarchy.
 
+Clone the repository, pin the release you reviewed, and install the script from that checkout. Nothing is fetched from a moving branch:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nixfred/plonk/main/plonk -o ~/.local/bin/plonk
-chmod +x ~/.local/bin/plonk
+git clone https://github.com/nixfred/plonk.git
+cd plonk
+git tag --list          # pick a release
+git checkout v1.1.0     # pin it, then read plonk before installing
+install -Dm755 plonk ~/.local/bin/plonk
 ```
 
 Preview the plan, then compact:
@@ -153,10 +158,10 @@ Plonk has been proposed for Omarchy as `omarchy-hyprland-workspace-compact` in [
 
 `plonk --watch` stays running and closes a gap when it actually appears: a window opened above a gap, last window closed or moved off a workspace, a workspace destroyed or moved, a monitor added or unplugged, or Hyprland reloaded — plus once right after it connects, so holes that predate the daemon (or survived a Hyprland restart) are closed too. Switching onto an empty workspace does **not** fill it — that hole closes when you leave, because filling the workspace under you would pull another workspace's windows into view. It is quiet, will not dump windows onto the empty workspace you are sitting on (on any monitor), pauses while the hyprshell/Swish switcher overlay is open (verified against `hyprctl layers`, so a missed close event cannot wedge it), follows a live Hyprland instance if the compositor restarted underneath it, and takes a lock in `~/.local/state/plonk/` so a manual `plonk` never races it. Needs `socat`. A trigger compacts immediately, then watches a bounded ~250 ms wall-clock settle window (`PLONK_SETTLE_US`) for a second real change. Events emitted by Plonk's own fallback are ignored, continuous `windowtitle` events cannot starve it, and a hole that opens during the settle is not lost.
 
-Run it as a user service (the unit is in this repo):
+Run it as a user service. The unit is in the same pinned checkout as the script; read it, then install and enable it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nixfred/plonk/main/plonk.service -o ~/.config/systemd/user/plonk.service
+install -Dm644 plonk.service ~/.config/systemd/user/plonk.service
 systemctl --user daemon-reload && systemctl --user enable --now plonk.service
 ```
 

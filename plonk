@@ -92,18 +92,27 @@ hypr_dispatch() {
   hyprctl dispatch "$lua" >/dev/null 2>&1 || hyprctl dispatch "$@" >/dev/null
 }
 
+# The state dir must be a real directory (never a planted symlink) before
+# anything is written under it. Backups and the notify stamp go through this.
+state_dir_ok() {
+  [[ -n $STATE_DIR && ! -L $STATE_DIR ]] || return 1
+  mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || return 1
+  [[ -d $STATE_DIR && ! -L $STATE_DIR ]]
+}
+
 # Only one plonk at a time: the SUPER+MINUS manual run and the --watch
 # daemon otherwise race each other mid-compact (double renumbering,
 # interleaved names-file rewrites). Waits briefly, then skips this round —
-# the holder is compacting anyway. The lock lives exactly as long as one
-# compact: fd 9 is closed on the way out (a long-lived daemon must not keep
-# holding it between rounds).
+# the holder is compacting anyway. The lock is flock(2) on the state
+# DIRECTORY itself, opened read-only: no lock file is created, so nothing on
+# a predictable path is ever opened for writing or truncated (marketplace
+# review #2941). The lock lives exactly as long as one compact: fd 9 is
+# closed on the way out (a long-lived daemon must not keep holding it).
 compact() {
   local rc=0
   COMPACT_LOCK_SKIPPED=0
-  if [[ -n $STATE_DIR ]] && command -v flock >/dev/null; then
-    mkdir -p "$STATE_DIR" 2>/dev/null || true
-    if { exec 9>"$STATE_DIR/lock"; } 2>/dev/null; then
+  if state_dir_ok && command -v flock >/dev/null; then
+    if { exec 9<"$STATE_DIR"; } 2>/dev/null; then
       if ! flock -w "${PLONK_LOCK_WAIT:-3}" 9 2>/dev/null; then
         exec 9>&-
         COMPACT_LOCK_SKIPPED=1
@@ -165,11 +174,23 @@ compact_unlocked() {
   # $XDG_STATE_HOME/plonk/names-backups, or $PLONK_STATE_DIR) so a bad remap
   # is always recoverable: ls -t ~/.local/state/plonk/names-backups | head.
   backup_names() {
-    [[ -n $STATE_DIR ]] || return 0
+    state_dir_ok || return 0
     local dir="$STATE_DIR/names-backups"
-    mkdir -p "$dir" 2>/dev/null || return 0
-    cp -p "$NAMES_FILE" "$dir/workspace-names.$(date +%Y%m%d-%H%M%S.%N).json" 2>/dev/null || return 0
+    [[ -L $dir ]] && return 0
+    mkdir -p -m 700 "$dir" 2>/dev/null || return 0
+    cp -p -- "$NAMES_FILE" "$dir/workspace-names.$(date +%Y%m%d-%H%M%S.%N).json" 2>/dev/null || return 0
     ls -1t "$dir"/workspace-names.*.json 2>/dev/null | tail -n +21 | xargs -r rm -f --
+  }
+
+  # The names file is user-writable config that another program owns. Only a
+  # plain regular file of sane size is ever opened: a symlink is never
+  # followed, a FIFO never read (jq would block the watcher forever), and an
+  # oversized file never parsed (marketplace review #2941).
+  names_file_usable() {
+    local size
+    [[ -f $NAMES_FILE && ! -L $NAMES_FILE ]] || return 1
+    size=$(stat -c %s -- "$NAMES_FILE" 2>/dev/null) || return 1
+    (( size <= ${PLONK_NAMES_MAX_BYTES:-1048576} ))
   }
 
   # Carry a workspace-names.json title (nixfred.workspace-names plugin, keyed
@@ -177,6 +198,15 @@ compact_unlocked() {
   # Atomic write like the workspace-name tool; no-op without file/name.
   remap_name() { # src dst
     local src=$1 dst=$2 tmp
+    [[ -n $NAMES_FILE ]] || return 0
+    [[ -e $NAMES_FILE || -L $NAMES_FILE ]] || return 0
+    if ! names_file_usable; then
+      if [[ -z ${names_warned:-} ]]; then
+        echo "plonk: $NAMES_FILE is not a regular file under ${PLONK_NAMES_MAX_BYTES:-1048576} bytes; workspace titles NOT remapped" >&2
+        names_warned=1
+      fi
+      return 0
+    fi
     [[ -s $NAMES_FILE ]] || return 0
     # Only a NAMED workspace carries its title along. An unnamed workspace
     # arriving on a slot leaves whatever title is there alone — titles are
@@ -226,14 +256,14 @@ compact_unlocked() {
 
   notify() { # headline — coalesced: at most one notification per 2 seconds
     local stamp now last
-    if [[ -n $STATE_DIR ]]; then
+    if state_dir_ok; then
       stamp="$STATE_DIR/last-notify"
       now=$(date +%s)
-      if [[ -f $stamp ]]; then
-        last=$(stat -c %Y "$stamp" 2>/dev/null || echo 0)
+      if [[ -f $stamp && ! -L $stamp ]]; then
+        last=$(stat -c %Y -- "$stamp" 2>/dev/null || echo 0)
         ((now - last < 2)) && return 0
       fi
-      mkdir -p "$STATE_DIR" 2>/dev/null && touch "$stamp" 2>/dev/null
+      [[ -L $stamp ]] || touch -- "$stamp" 2>/dev/null
     fi
     if command -v omarchy-notification-send >/dev/null; then
       omarchy-notification-send --app-name plonk -g 󰕴 -u low "plonk" "$1" -t 1500 >/dev/null 2>&1 || true

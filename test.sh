@@ -180,6 +180,41 @@ grep -F 'Plonked 3 workspaces' "$nlog" >/dev/null || fail "--notify uses plonk a
 pass "--notify notifications coalesce to one per 2s"
 rm -f "$stub/omarchy-notification-send"
 
+# --- hardening from marketplace review #2941 ---------------------------------
+# The lock must never open a predictable path for writing: a symlink planted
+# at the old lock location must not be followed or truncated.
+canary="$tmpdir/canary.txt"; printf 'CANARY\n' >"$canary"
+mkdir -p "$tmpdir/state-sandbox"; rm -f "$tmpdir/state-sandbox/lock"
+ln -s "$canary" "$tmpdir/state-sandbox/lock"
+run_plonk >/dev/null 2>&1
+[[ $(cat "$canary") == CANARY ]] || fail "a symlink at the old lock path was followed and truncated"
+[[ -L $tmpdir/state-sandbox/lock ]] && rm -f "$tmpdir/state-sandbox/lock"
+pass "lock never writes through a planted symlink"
+
+# A symlinked names file is never followed: the target stays untouched.
+target="$tmpdir/names-target.json"; printf '%s\n' '{"3":"Brave"}' >"$target"
+ln -sf "$target" "$tmpdir/names-link.json"
+err=$(WORKSPACE_NAMES_FILE="$tmpdir/names-link.json" run_plonk 2>&1 >/dev/null) || fail "symlinked names file must not break the compact"
+[[ $(jq -c . "$target") == '{"3":"Brave"}' ]] || fail "symlinked names file was followed and rewritten: $(cat "$target")"
+grep -F 'titles NOT remapped' <<<"$err" >/dev/null || fail "symlinked names file must be reported, got: $err"
+pass "symlinked names file is left alone and reported"
+
+# A FIFO at the names path must not block the run (jq would wait for a
+# writer forever, wedging the watcher).
+mkfifo "$tmpdir/names.fifo"
+WORKSPACE_NAMES_FILE="$tmpdir/names.fifo" PATH="$stub:$PATH" timeout 5 "$PLONK" >/dev/null 2>&1 || fail "a FIFO at the names path blocked or failed the run (rc=$?)"
+rm -f "$tmpdir/names.fifo"
+pass "FIFO at the names path does not block plonk"
+
+# An oversized names file is never parsed, however valid it is.
+big="$tmpdir/names-big.json"
+{ printf '{"3":"Brave","pad":"'; head -c 1200000 /dev/zero | tr '\0' 'x'; printf '"}\n'; } >"$big"
+before=$(stat -c %s "$big")
+err=$(WORKSPACE_NAMES_FILE="$big" run_plonk 2>&1 >/dev/null) || fail "oversized names file must not break the compact"
+[[ $(stat -c %s "$big") == "$before" ]] || fail "oversized names file was rewritten"
+grep -F 'titles NOT remapped' <<<"$err" >/dev/null || fail "oversized names file must be reported, got: $err"
+pass "oversized names file is skipped and reported"
+
 # names file missing -> no-op, no error
 : >"$log"
 WORKSPACE_NAMES_FILE="$tmpdir/does-not-exist.json" run_plonk >/dev/null || fail "missing names file must not fail"
@@ -414,7 +449,8 @@ pass "watch does not lose a hole that opens while it is settling"
 write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
 if command -v flock >/dev/null; then
   mkdir -p "$tmpdir/state-sandbox"
-  ( flock 9; sleep 1.2 ) 9>"$tmpdir/state-sandbox/lock" &
+  mkdir -p "$tmpdir/state-sandbox"
+  ( flock 9; sleep 1.2 ) 9<"$tmpdir/state-sandbox" &
   locker=$!
   sleep 0.1
   out=$(PLONK_LOCK_WAIT=0.3 run_plonk 2>&1) || fail "locked-out plonk must exit 0, got: $out"
@@ -433,7 +469,7 @@ if command -v flock >/dev/null; then
   watcher=$!
   sleep 1.2   # daemon has compacted once by now
   grep -F 'change_id' "$log" >/dev/null || fail "watch daemon did not compact in the lock-release test, log=$(cat "$log")"
-  flock -n "$tmpdir/state-sandbox/lock" -c true || fail "watch daemon keeps holding the lock between rounds"
+  flock -n "$tmpdir/state-sandbox" -c true || fail "watch daemon keeps holding the lock between rounds"
   kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null || true
   pass "watch daemon releases the lock after each compact"
 else
@@ -607,7 +643,8 @@ pass "watch ignores the fallback events it emits itself"
 # and retry after the lock is released even when no second event arrives.
 write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
 start_event_socket "$SOCK" ''
-( flock 9; sleep 0.18 ) 9>"$tmpdir/state-sandbox/lock" &
+mkdir -p "$tmpdir/state-sandbox"
+( flock 9; sleep 0.18 ) 9<"$tmpdir/state-sandbox" &
 locker=$!
 sleep 0.02
 XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_LOCK_WAIT=0.02 PLONK_SETTLE_US=50000 \
