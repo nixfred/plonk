@@ -50,7 +50,7 @@ Hyprland workspace IDs are global. Plonk reads the compositor's workspace and cl
 
 By default a workspace is renumbered by moving its windows to the new number and pinning that workspace to the original monitor. Every bar follows the create/destroy events this produces, so the number line updates everywhere.
 
-Hyprland also has `hl.dsp.workspace.change_id`, which renumbers in place and keeps the tiling layout. It is **opt-in** because it emits `changeworkspaceid`, an event Quickshell 0.3.1 ignores: the stock Omarchy bar keeps showing the old number as a ghost and the renumbered workspace as empty until something else refreshes it. If your bar handles that event (for example [nixfred.workspace-names](https://github.com/nixfred/workspace-names)), turn it on with the environment variable `PLONK_RENUMBER=change_id`, or put `change_id` on the first line of `~/.config/plonk/renumber` (the plugin and the daemon re-read it on every compact). When the target ID is held by an empty persistent workspace, or `change_id` fails, Plonk moves the windows instead.
+Hyprland also has `hl.dsp.workspace.change_id`, which renumbers in place and keeps the tiling layout. It is **opt-in** because it emits `changeworkspaceid`, an event Quickshell 0.3.1 ignores: the stock Omarchy bar keeps showing the old number as a ghost and the renumbered workspace as empty until something else refreshes it. If your bar handles that event (for example [nixfred.workspace-names](https://github.com/nixfred/workspace-names)), turn it on with `renumber=change_id` in `~/.config/plonk/config` or the environment variable `PLONK_RENUMBER=change_id` (see [Configuration](#configuration)). When the target ID is held by an empty persistent workspace, or `change_id` fails, Plonk moves the windows instead.
 
 Your active workspace follows its new number, so the desktop does not pull focus out from under you.
 
@@ -111,7 +111,7 @@ Clone the repository, pin the release you reviewed, and install the script from 
 git clone https://github.com/nixfred/plonk.git
 cd plonk
 git tag --list          # pick a release
-git checkout v1.1.1     # pin it, then read plonk before installing
+git checkout v1.1.2     # pin it, then read plonk before installing
 install -Dm755 plonk ~/.local/bin/plonk
 ```
 
@@ -158,7 +158,7 @@ Plonk has been proposed for Omarchy as `omarchy-hyprland-workspace-compact` in [
 
 ## Auto-plonk (watch mode)
 
-`plonk --watch` stays running and closes a gap when it actually appears: a window opened above a gap, last window closed or moved off a workspace, a workspace destroyed or moved, a monitor added or unplugged, or Hyprland reloaded — plus once right after it connects, so holes that predate the daemon (or survived a Hyprland restart) are closed too. Switching onto an empty workspace does **not** fill it — that hole closes when you leave, because filling the workspace under you would pull another workspace's windows into view. It is quiet, will not dump windows onto the empty workspace you are sitting on (on any monitor), pauses while the hyprshell/Swish switcher overlay is open (verified against `hyprctl layers`, so a missed close event cannot wedge it), follows a live Hyprland instance if the compositor restarted underneath it, and takes a lock in `~/.local/state/plonk/` so a manual `plonk` never races it. Needs `socat`. A trigger compacts immediately, then watches a bounded ~250 ms wall-clock settle window (`PLONK_SETTLE_US`) for a second real change. Events emitted by Plonk's own fallback are ignored, continuous `windowtitle` events cannot starve it, and a hole that opens during the settle is not lost.
+`plonk --watch` stays running and closes a gap when it actually appears: a window opened above a gap, last window closed or moved off a workspace, a workspace destroyed or moved, a monitor added or unplugged, or Hyprland reloaded — plus once right after it connects, so holes that predate the daemon (or survived a Hyprland restart) are closed too. Switching onto an empty workspace does **not** fill it — that hole closes when you leave, because filling the workspace under you would pull another workspace's windows into view. If you would rather have the pack close under you the moment your workspace empties, set `empty_active=fill` (see [Configuration](#configuration)): after a short grace, Plonk jumps you to the next occupied workspace on that monitor and renumbers it down. It is quiet, will not dump windows onto the empty workspace you are sitting on (on any monitor), pauses while the hyprshell/Swish switcher overlay is open (verified against `hyprctl layers`, so a missed close event cannot wedge it), follows a live Hyprland instance if the compositor restarted underneath it, and takes a lock in `~/.local/state/plonk/` so a manual `plonk` never races it. Needs `socat`. A trigger compacts immediately, then watches a bounded ~250 ms wall-clock settle window (`PLONK_SETTLE_US`) for a second real change. Events emitted by Plonk's own fallback are ignored, continuous `windowtitle` events cannot starve it, and a hole that opens during the settle is not lost.
 
 Run it as a user service. The unit is in the same pinned checkout as the script; read it, then install and enable it:
 
@@ -168,3 +168,15 @@ systemctl --user daemon-reload && systemctl --user enable --now plonk.service
 ```
 
 The unit expects `plonk` at `~/.local/bin/plonk` (edit `ExecStart` otherwise). `plonk --watch --notify` adds desktop notifications; without it the watcher never reports. Manual `plonk` and the keybind keep working alongside it.
+
+## Configuration
+
+Optional. Environment variables win, then `~/.config/plonk/config` (`key=value` lines, `#` comments). Both the plugin and the daemon re-read it on every compact, so changes apply without a restart.
+
+```ini
+# ~/.config/plonk/config
+renumber=move       # or change_id — see "How it works"   (env PLONK_RENUMBER)
+empty_active=keep   # or fill — see "Auto-plonk"          (env PLONK_EMPTY_ACTIVE)
+```
+
+`PLONK_FILL_DELAY_MS` (default 300) is the grace before `fill` jumps, so a window you open right after closing the last one still lands on the workspace you were on. The older one-line `~/.config/plonk/renumber` file is still honored. Unknown keys are reported once and ignored.

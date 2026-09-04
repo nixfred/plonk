@@ -431,6 +431,55 @@ grep -F 'change_id' "$log" >/dev/null && fail "watch must not fill the empty act
 grep -F 'window.move' "$log" >/dev/null && fail "watch must not dump windows onto the empty active workspace"
 pass "watch leaves the empty workspace you are sitting on alone"
 
+# empty_active=fill: the workspace under the user emptied -> jump to the next
+# occupied workspace on that monitor right away (Hyprland drops the empty
+# one and the next round renumbers), instead of waiting for them to leave.
+write_stub '{"id":2}' '[{"name":"eDP-1"}]' "$HOLE_SITTING" "$HOLE_CLIENTS"
+start_event_socket "$SOCK" $'closewindow>>b\n'
+PLONK_EMPTY_ACTIVE=fill PLONK_FILL_DELAY_MS=0 run_watch_once >/dev/null
+grep -Fx 'dispatch hl.dsp.focus({ workspace = "3" })' "$log" >/dev/null ||
+  fail "fill must jump to the next occupied workspace, log=$(cat "$log")"
+grep -F 'window.move' "$log" >/dev/null && fail "fill must jump, not dump windows under the user, log=$(cat "$log")"
+grep -F 'change_id' "$log" >/dev/null && fail "fill must not renumber onto the workspace the user is on, log=$(cat "$log")"
+pass "empty_active=fill jumps to the next occupied workspace immediately"
+
+# ...but stands down if the user already left during the grace (the third
+# activeworkspace read is the post-grace re-check).
+fill_calls="$tmpdir/fill-active.calls"; printf '0\n' >"$fill_calls"
+cat >"$stub/hyprctl" <<STUB
+#!/bin/bash
+case "\$1" in
+  activeworkspace)
+    n=\$(cat "$fill_calls"); n=\$((n + 1)); printf '%s\n' "\$n" >"$fill_calls"
+    if ((n <= 2)); then printf '%s\n' '{"id":2}'; else printf '%s\n' '{"id":1}'; fi ;;
+  monitors) printf '%s\n' '[{"name":"eDP-1"}]' ;;
+  workspaces) printf '%s\n' '$HOLE_SITTING' ;;
+  clients) printf '%s\n' '$HOLE_CLIENTS' ;;
+  layers) printf '%s\n' '{}' ;;
+  dispatch) printf '%s\n' "\$*" >>"$log"; echo ok ;;
+  *) echo "unexpected hyprctl \$1" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$stub/hyprctl"
+: >"$log"
+start_event_socket "$SOCK" ''
+PLONK_EMPTY_ACTIVE=fill PLONK_FILL_DELAY_MS=0 run_watch_once >/dev/null
+grep -F 'hl.dsp.focus' "$log" >/dev/null && fail "fill must stand down when the user already left, log=$(cat "$log")"
+pass "fill stands down when the user leaves during the grace"
+
+# The same switch from the config file (plugin users have no env).
+write_stub '{"id":2}' '[{"name":"eDP-1"}]' "$HOLE_SITTING" "$HOLE_CLIENTS"
+mkdir -p "$XDG_CONFIG_HOME/plonk"
+printf '# plonk\nempty_active = fill\nrenumber=change_id\nbogus=1\n' >"$XDG_CONFIG_HOME/plonk/config"
+start_event_socket "$SOCK" ''
+err=$(XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_FILL_DELAY_MS=0 \
+  PATH="$stub:$PATH" env -u PLONK_RENUMBER timeout 3 "$PLONK" --watch 2>&1 >/dev/null || true)
+grep -Fx 'dispatch hl.dsp.focus({ workspace = "3" })' "$log" >/dev/null ||
+  fail "config file empty_active=fill must be honored, log=$(cat "$log")"
+grep -F "unknown option 'bogus'" <<<"$err" >/dev/null || fail "unknown config keys must be reported, got: $err"
+rm -f "$XDG_CONFIG_HOME/plonk/config"
+pass "~/.config/plonk/config drives empty_active and reports unknown keys"
+
 # A steady stream of windowtitle events (terminal spinners, browsers) must
 # not starve the watcher: the settle window is wall-clock bounded, so the
 # compact still happens while titles keep flowing.

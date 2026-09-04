@@ -19,8 +19,9 @@
 # (window opened above a gap, last window closed/moved off a workspace,
 # workspace destroyed, monitor unplugged) and once on connect — not on
 # every workspace switch. Quiet, never fills or steals
-# focus from the empty workspace you are sitting on, pauses while the
-# hyprshell/Swish overlay is open. Needs socat.
+# focus from the empty workspace you are sitting on (unless
+# empty_active=fill, see below), pauses while the hyprshell/Swish overlay
+# is open. Needs socat.
 #
 # Usage: plonk [-n|--dry-run] [--notify] | plonk --watch [--notify]
 set -euo pipefail
@@ -48,38 +49,73 @@ else
   STATE_DIR=
 fi
 
-# How a workspace gets its new number. "move" (default) moves the windows and
-# pins the new workspace to the old monitor; every bar follows the resulting
-# create/destroy events. "change_id" uses hl.dsp.workspace.change_id, which
-# keeps the tiling layout but emits changeworkspaceid — an event Quickshell
-# 0.3.1 ignores, so the stock Omarchy bar shows the old number as a ghost.
-# Opt in with PLONK_RENUMBER=change_id, or a file whose first line is
-# change_id at $XDG_CONFIG_HOME/plonk/renumber (~/.config/plonk/renumber).
+# Options. Environment wins, then ~/.config/plonk/config (key=value lines,
+# "#" comments), then the legacy one-line ~/.config/plonk/renumber file.
 # Re-read on every compact, so the daemon follows the file without a restart.
+#
+#   renumber=move|change_id   (PLONK_RENUMBER)
+#     "move" (default) moves the windows and pins the new workspace to the
+#     old monitor; every bar follows the resulting create/destroy events.
+#     "change_id" uses hl.dsp.workspace.change_id, which keeps the tiling
+#     layout but emits changeworkspaceid — an event Quickshell 0.3.1
+#     ignores, so the stock Omarchy bar shows the old number as a ghost.
+#   empty_active=keep|fill    (PLONK_EMPTY_ACTIVE)
+#     What --watch does when the workspace you are ON becomes empty. "keep"
+#     (default) leaves it; the hole closes when you switch away. "fill"
+#     jumps you to the next occupied workspace on that monitor right away —
+#     after a short grace (PLONK_FILL_DELAY_MS, default 300) so a window you
+#     open in the same breath still lands where you were — and the compact
+#     then renumbers it down.
 if [[ -n ${XDG_CONFIG_HOME:-} ]]; then
-  RENUMBER_FILE=$XDG_CONFIG_HOME/plonk/renumber
+  CONFIG_DIR=$XDG_CONFIG_HOME/plonk
 elif [[ -n ${HOME:-} ]]; then
-  RENUMBER_FILE=$HOME/.config/plonk/renumber
+  CONFIG_DIR=$HOME/.config/plonk
 else
-  RENUMBER_FILE=
+  CONFIG_DIR=
 fi
 RENUMBER=move
-RENUMBER_WARNED=
-read_renumber_mode() {
-  local mode=${PLONK_RENUMBER:-}
-  if [[ -z $mode && -n $RENUMBER_FILE && -f $RENUMBER_FILE && ! -L $RENUMBER_FILE ]]; then
-    IFS= read -r -n 32 mode <"$RENUMBER_FILE" || true
-    mode=${mode//[[:space:]]/}
+EMPTY_ACTIVE=keep
+CONFIG_WARNED=
+config_warn() { # once per process: a daemon must not repeat this every round
+  [[ -n $CONFIG_WARNED ]] && return 0
+  echo "plonk: $1" >&2
+  CONFIG_WARNED=1
+}
+# Only a plain regular file, never a symlink, bounded in size.
+config_file_usable() {
+  local f=$1 size
+  [[ -n $f && -f $f && ! -L $f ]] || return 1
+  size=$(stat -c %s -- "$f" 2>/dev/null) || return 1
+  (( size <= 65536 ))
+}
+read_config() {
+  local renumber=${PLONK_RENUMBER:-} empty=${PLONK_EMPTY_ACTIVE:-} line key val n=0
+  if [[ -n $CONFIG_DIR ]] && config_file_usable "$CONFIG_DIR/config"; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      (( ++n > 64 )) && break
+      line=${line%%#*}
+      line=${line//[[:space:]]/}
+      [[ -n $line && $line == *=* ]] || continue
+      key=${line%%=*}
+      val=${line#*=}
+      case "$key" in
+        renumber)     [[ -n $renumber ]] || renumber=$val ;;
+        empty_active) [[ -n $empty ]] || empty=$val ;;
+        *) config_warn "unknown option '$key' in $CONFIG_DIR/config (ignored)" ;;
+      esac
+    done <"$CONFIG_DIR/config"
   fi
-  case "${mode:-move}" in
-    move|change_id) RENUMBER=${mode:-move} ;;
-    *)
-      if [[ -z $RENUMBER_WARNED ]]; then
-        echo "plonk: unknown renumber mode '$mode' (want move or change_id); moving windows" >&2
-        RENUMBER_WARNED=1
-      fi
-      RENUMBER=move
-      ;;
+  if [[ -z $renumber && -n $CONFIG_DIR ]] && config_file_usable "$CONFIG_DIR/renumber"; then
+    IFS= read -r -n 32 renumber <"$CONFIG_DIR/renumber" || true
+    renumber=${renumber//[[:space:]]/}
+  fi
+  case "${renumber:-move}" in
+    move|change_id) RENUMBER=${renumber:-move} ;;
+    *) config_warn "unknown renumber mode '$renumber' (want move or change_id); moving windows"; RENUMBER=move ;;
+  esac
+  case "${empty:-keep}" in
+    keep|fill) EMPTY_ACTIVE=${empty:-keep} ;;
+    *) config_warn "unknown empty_active mode '$empty' (want keep or fill); keeping"; EMPTY_ACTIVE=keep ;;
   esac
 }
 
@@ -166,7 +202,7 @@ compact() {
 
 compact_unlocked() {
   local active snapshot_active current_active clients workspaces monitors new_active moves target active_seen ws mon active_windows skip_target names_warned=
-  read_renumber_mode
+  read_config
   active=$(hyprctl activeworkspace -j | jq -r '.id')
   [[ $active =~ ^-?[0-9]+$ ]] || { echo "plonk: could not read active workspace" >&2; return 1; }
 
@@ -311,9 +347,37 @@ compact_unlocked() {
     fi
   }
 
+  # empty_active=fill: the workspace under the user just emptied. After the
+  # grace (a window opened in the same breath must still land here), confirm
+  # it is still empty and still focused, then jump to the next occupied
+  # numeric workspace on the same monitor. Hyprland drops the empty one and
+  # the resulting events start a fresh round that renumbers as usual.
+  # Returns 0 when we jumped.
+  fill_under_user() { # active
+    local a=$1 mon next delay_ms now_active now_windows
+    mon=$(jq -r --argjson a "$a" '[.[] | select(.id == $a) | .monitor] | first // empty' <<<"$workspaces")
+    [[ -n $mon ]] || return 1
+    next=$(jq -r --argjson a "$a" --arg m "$mon" \
+      '[.[] | select(.id > $a and .windows > 0 and .monitor == $m and ((.name // "") | test("^[0-9]+$"))) | .id] | min // empty' <<<"$workspaces")
+    [[ -n $next ]] || return 1
+    delay_ms=${PLONK_FILL_DELAY_MS:-300}
+    [[ $delay_ms =~ ^[0-9]+$ ]] || delay_ms=300
+    if ((delay_ms > 0)); then sleep "$((delay_ms / 1000)).$(printf '%03d' $((delay_ms % 1000)))"; fi
+    now_active=$(hyprctl activeworkspace -j | jq -r '.id')
+    [[ $now_active == "$a" ]] || return 1
+    now_windows=$(hyprctl workspaces -j | jq -r --argjson a "$a" '[.[] | select(.id == $a) | .windows] | first // 0')
+    [[ $now_windows == 0 ]] || return 1
+    hypr_dispatch "hl.dsp.focus({ workspace = \"$next\" })" workspace "$next"
+    echo "plonk: workspace $a emptied under you; moved to $next" >&2
+    return 0
+  }
+
   active_windows=$(jq -r --argjson a "$active" '[.[] | select(.id == $a) | .windows] | first // 0' <<<"$workspaces")
   skip_target=0
   if ((keep_empty_active && active > 0 && active_windows == 0)); then
+    if [[ $EMPTY_ACTIVE == fill ]] && fill_under_user "$active"; then
+      return 0
+    fi
     skip_target=$active
   fi
 
