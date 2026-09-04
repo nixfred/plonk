@@ -9,8 +9,8 @@
 # by id) travel with the workspace when it is renumbered; override the file
 # with WORKSPACE_NAMES_FILE.
 # If you were sitting on an empty workspace you land on the first free slot
-# after the compacted ones. Sends a desktop notification when available
-# (omarchy-notification-send / notify-send).
+# after the compacted ones. Silent by default: --notify adds a desktop
+# notification (omarchy-notification-send / notify-send) in any mode.
 #
 # --watch keeps running and auto-plonks when a hole actually appears
 # (window opened above a gap, last window closed/moved off a workspace,
@@ -19,7 +19,7 @@
 # focus from the empty workspace you are sitting on, pauses while the
 # hyprshell/Swish overlay is open. Needs socat.
 #
-# Usage: plonk [-n|--dry-run] | plonk --watch [--notify]
+# Usage: plonk [-n|--dry-run] [--notify] | plonk --watch [--notify]
 set -euo pipefail
 
 if [[ ${WORKSPACE_NAMES_FILE+x} ]]; then
@@ -45,7 +45,7 @@ else
   STATE_DIR=
 fi
 
-usage() { echo "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]" >&2; }
+usage() { echo "Usage: plonk [-n|--dry-run] [--notify] | plonk --watch [--notify]" >&2; }
 
 dry=0
 watch=0
@@ -58,7 +58,7 @@ for arg in "$@"; do
     -w|--watch) watch=1 quiet=1 keep_empty_active=1 ;;
     --notify) notify_en=1 ;;
     -h|--help)
-      echo "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]"
+      echo "Usage: plonk [-n|--dry-run] [--notify] | plonk --watch [--notify]"
       exit 0
       ;;
     *)
@@ -74,13 +74,16 @@ for c in hyprctl jq; do command -v "$c" >/dev/null || { echo "plonk: $c not foun
 
 # Watch-mode bookkeeping. A manual run ignores these, but the daemon uses
 # them to distinguish events produced by its own window-move fallback from a
-# real second hole that arrives while it is settling.
+# real second hole that arrives while it is settling. Window addresses are
+# keyed WITHOUT the 0x prefix: `hyprctl clients -j` reports "0x5587fd748d40"
+# but socket2 events carry the bare hex ("movewindowv2>>5587fd748d40,3,3").
 COMPACT_LOCK_SKIPPED=0
-declare -A OWN_MOVES=() OWN_DESTROYS=()
+declare -A OWN_MOVES=() OWN_DESTROYS=() OWN_WSMOVES=()
 
 clear_own_events() {
   OWN_MOVES=()
   OWN_DESTROYS=()
+  OWN_WSMOVES=()
 }
 
 hypr_dispatch() {
@@ -152,7 +155,7 @@ compact_unlocked() {
     OWN_DESTROYS[$src]=1
     while IFS= read -r addr; do
       [[ -n $addr && $addr != null ]] || continue
-      OWN_MOVES["$addr,$dst"]=1
+      OWN_MOVES["${addr#0x},$dst"]=1
       hypr_dispatch "hl.dsp.window.move({ window = \"address:$addr\", workspace = \"$dst\", follow = false })" \
         movetoworkspacesilent "$dst,address:$addr"
     done < <(jq -r --argjson w "$src" '.[] | select(.workspace.id == $w) | .address' <<<"$clients")
@@ -213,6 +216,7 @@ compact_unlocked() {
       fi
     fi
     move_windows "$src" "$dst"
+    OWN_WSMOVES[$dst]=1
     hypr_dispatch "hl.dsp.workspace.move({ workspace = \"$dst\", monitor = \"$mon\" })" \
       moveworkspacetomonitor "$dst" "$mon"
     taken[$dst]=1
@@ -281,10 +285,11 @@ compact_unlocked() {
       hypr_dispatch "hl.dsp.focus({ workspace = \"$new_active\" })" workspace "$new_active"
     fi
   fi
+  # Silent unless --notify was given: plonk does its work without reporting.
   if ((moves == 0)); then
     ((quiet)) || echo "plonk: Already Plonked!"
-    if ((dry == 0 && quiet == 0)); then notify "Already Plonked!"; fi
-  elif ((dry == 0 && (notify_en || quiet == 0))); then
+    if ((dry == 0 && notify_en)); then notify "Already Plonked!"; fi
+  elif ((dry == 0 && notify_en)); then
     notify "Plonked $moves workspace$( ((moves == 1)) || echo s )"
   fi
 }
@@ -325,11 +330,12 @@ watch_connection() {
   own_trigger() {
     local event=$1 event_payload=$2
     case "$event" in
-      movewindow)
-        [[ -n ${OWN_MOVES[$event_payload]+x} ]]
+      movewindow)   # ADDR,WORKSPACENAME
+        [[ -n ${OWN_MOVES[${event_payload#0x}]+x} ]]
         ;;
-      movewindowv2)
+      movewindowv2) # ADDR,WORKSPACEID,WORKSPACENAME
         move_addr=${event_payload%%,*}
+        move_addr=${move_addr#0x}
         move_rest=${event_payload#*,}
         move_dst=${move_rest%%,*}
         [[ -n ${OWN_MOVES["$move_addr,$move_dst"]+x} ]]
@@ -340,6 +346,9 @@ watch_connection() {
       destroyworkspacev2)
         destroy_id=${event_payload%%,*}
         [[ -n ${OWN_DESTROYS[$destroy_id]+x} ]]
+        ;;
+      moveworkspace|moveworkspacev2) # WORKSPACEID,... — our fallback pins dst to its monitor
+        [[ -n ${OWN_WSMOVES[${event_payload%%,*}]+x} ]]
         ;;
       *) return 1 ;;
     esac
@@ -388,6 +397,7 @@ watch_connection() {
   # Connect before the initial compact. Events that land during that first
   # snapshot are buffered on this fd and cannot fall through a startup gap.
   exec {event_fd}< <(socat -u UNIX-CONNECT:"$sock" -)
+  SOCAT_PID=$!
 
   run_pending_compacts() {
     if ((need && paused)); then overlay_open || paused=0; fi
@@ -432,10 +442,26 @@ watch_connection() {
     run_pending_compacts
   done
   exec {event_fd}<&-
+  kill_socat
+}
+
+# The event reader is a process-substitution child. When the daemon is
+# stopped (plugin disabled, shell restarted, systemctl stop) bash exits but
+# that socat would linger, still connected to Hyprland, until the next event
+# hits its dead pipe. Take it down with us.
+SOCAT_PID=
+kill_socat() {
+  [[ -n ${SOCAT_PID:-} ]] || return 0
+  kill "$SOCAT_PID" 2>/dev/null || true
+  SOCAT_PID=
 }
 
 watch() {
   command -v socat >/dev/null || { echo "plonk: socat not found (needed for --watch)" >&2; return 1; }
+  trap 'kill_socat; exit 143' TERM
+  trap 'kill_socat; exit 130' INT
+  trap 'kill_socat; exit 129' HUP
+  trap kill_socat EXIT
 
   while true; do
     watch_connection || true

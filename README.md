@@ -68,7 +68,7 @@ For example, workspaces 3 and 5 on `eDP-1` plus 7 and 8 on `HDMI-A-1` become 1, 
 - Named workspaces are ignored.
 - Titles from the [nixfred.workspace-names](https://github.com/nixfred/workspace-names) plugin (`~/.config/omarchy/workspace-names.json`, keyed by workspace id) **travel with their workspace** when it is renumbered. The file is snapshotted before every rewrite (last 20 in `~/.local/state/plonk/names-backups/`), an unnamed workspace arriving on a slot never deletes the slot's title, and plonk never removes a title on its own. Override the path with `WORKSPACE_NAMES_FILE`.
 - If you were sitting on an empty workspace above the pack, you land on the first free slot.
-- Every run sends a short desktop notification (`Plonked 3 workspaces` / `Already Plonked!`) via `omarchy-notification-send` or `notify-send` when present.
+- Silent by default: it just does its work. Add `--notify` for a short desktop notification (`Plonked 3 workspaces` / `Already Plonked!`) via `omarchy-notification-send` or `notify-send` when present.
 - Window contents and tiling are preserved when the native ID-change dispatcher is available.
 - `--dry-run` prints the complete move plan without dispatching anything.
 
@@ -95,7 +95,7 @@ Remove it cleanly with:
 omarchy plugin remove io.github.nixfred.plonk
 ```
 
-Removal disables the service before deleting its checkout. Plonk leaves only runtime state in `~/.local/state/plonk/`: a lock file, a notification timestamp, and—when the workspace-names integration is used—up to 20 safety backups. Those files are inert and may be deleted manually if you do not want the recovery history.
+Removal disables the service before deleting its checkout, and the watcher takes its `socat` event reader down with it. Plonk leaves only runtime state in `~/.local/state/plonk/`: a lock file, a notification timestamp (only if you used `--notify`), and—when the workspace-names integration is used—up to 20 safety backups. Those files are inert and may be deleted manually if you do not want the recovery history.
 
 ## Install the standalone command
 
@@ -160,4 +160,4 @@ curl -fsSL https://raw.githubusercontent.com/nixfred/plonk/main/plonk.service -o
 systemctl --user daemon-reload && systemctl --user enable --now plonk.service
 ```
 
-The unit expects `plonk` at `~/.local/bin/plonk` (edit `ExecStart` otherwise). `plonk --watch --notify` adds the desktop notifications. Manual `plonk` and the keybind keep working alongside it.
+The unit expects `plonk` at `~/.local/bin/plonk` (edit `ExecStart` otherwise). `plonk --watch --notify` adds desktop notifications; without it the watcher never reports. Manual `plonk` and the keybind keep working alongside it.

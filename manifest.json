@@ -4,6 +4,8 @@
   "name": "Plonk",
   "version": "1.0.0",
   "author": "Fred Nix",
+  "license": "MIT",
+  "homepage": "https://github.com/nixfred/plonk",
   "description": "Packs occupied numeric Hyprland workspaces into 1…N as gaps appear, preserving order, tiling, monitor placement, and focus.",
   "kinds": ["service"],
   "entryPoints": {

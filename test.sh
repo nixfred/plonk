@@ -56,10 +56,10 @@ run_plonk() { PATH="$stub:$PATH" "$PLONK" "$@"; }
 # --- --help / bad args never dispatch --------------------------------------
 write_stub '{"id":1}' '[]' '[]' '[]'
 out=$(run_plonk --help) || fail "--help should exit 0"
-[[ $out == "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]" ]] || fail "--help prints usage"
+[[ $out == "Usage: plonk [-n|--dry-run] [--notify] | plonk --watch [--notify]" ]] || fail "--help prints usage"
 [[ ! -s $log ]] || fail "--help does not dispatch"
 out=$(env -u HOME -u XDG_CONFIG_HOME PATH="$stub:$PATH" "$PLONK" --help) || fail "--help should work without HOME"
-[[ $out == "Usage: plonk [-n|--dry-run] | plonk --watch [--notify]" ]] || fail "--help without HOME prints usage"
+[[ $out == "Usage: plonk [-n|--dry-run] [--notify] | plonk --watch [--notify]" ]] || fail "--help without HOME prints usage"
 run_plonk --bogus >/dev/null 2>&1 && fail "unknown flag should exit non-zero" || true
 [[ ! -s $log ]] || fail "unknown flag does not dispatch"
 run_plonk -n extra >/dev/null 2>&1 && fail "extra args should exit non-zero" || true
@@ -146,7 +146,9 @@ pass "plonk never deletes a title on its own"
 ls "$tmpdir/state-sandbox/names-backups"/workspace-names.*.json >/dev/null 2>&1 || fail "a names backup is written before any remap"
 pass "names file is backed up before plonk rewrites it"
 
-# notifications coalesce: two runs inside 2s -> one notification
+# notifications are OPT-IN (Fred 2026-09-04: "it should just do its work
+# without reporting a notification"). Without --notify nothing is sent, even
+# when a notifier is on PATH and even for a no-op run.
 cat >"$stub/omarchy-notification-send" <<'EOF3'
 #!/bin/bash
 echo "notify $*" >>"$NOTIFY_LOG"
@@ -155,10 +157,27 @@ chmod +x "$stub/omarchy-notification-send"
 nlog="$tmpdir/notify.log"; : >"$nlog"
 rm -f "$tmpdir/state-sandbox/last-notify"
 NOTIFY_LOG="$nlog" run_plonk >/dev/null
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":2,"name":"2","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":2}}]'
 NOTIFY_LOG="$nlog" run_plonk >/dev/null
-NOTIFY_LOG="$nlog" run_plonk >/dev/null
-[[ $(grep -c '^notify' "$nlog") == 1 ]] || fail "three runs within 2s must notify once, got: $(cat "$nlog")"
-pass "notifications coalesce to one per 2s"
+[[ ! -s $nlog ]] || fail "plonk must be silent without --notify, got: $(cat "$nlog")"
+[[ ! -e $tmpdir/state-sandbox/last-notify ]] || fail "no notify stamp may be written without --notify"
+pass "no desktop notification unless --notify"
+
+# with --notify they coalesce: three runs inside 2s -> one notification
+write_stub '{"id":7}' \
+  '[{"name":"eDP-1"}]' \
+  '[{"id":7,"name":"7","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":2},{"id":4,"name":"4","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":3}},{"address":"0xb","workspace":{"id":3}},{"address":"0xc","workspace":{"id":4}},{"address":"0xd","workspace":{"id":7}}]'
+: >"$nlog"
+rm -f "$tmpdir/state-sandbox/last-notify"
+NOTIFY_LOG="$nlog" run_plonk --notify >/dev/null
+NOTIFY_LOG="$nlog" run_plonk --notify >/dev/null
+NOTIFY_LOG="$nlog" run_plonk --notify >/dev/null
+[[ $(grep -c '^notify' "$nlog") == 1 ]] || fail "three --notify runs within 2s must notify once, got: $(cat "$nlog")"
+grep -F 'Plonked 3 workspaces' "$nlog" >/dev/null || fail "--notify uses plonk as a verb, got: $(cat "$nlog")"
+pass "--notify notifications coalesce to one per 2s"
 rm -f "$stub/omarchy-notification-send"
 
 # names file missing -> no-op, no error
@@ -536,8 +555,11 @@ grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$lo
   fail "watch must compact before a second pre-settle budget elapses, log=$(cat "$log")"
 pass "watch compacts first and settles afterward"
 
-# The window-move fallback emits movewindow + destroyworkspace events of its
-# own. They must be swallowed rather than causing a redundant no-op round.
+# The window-move fallback emits movewindow + moveworkspace + destroyworkspace
+# events of its own. They must be swallowed rather than causing a redundant
+# no-op round. Real socket2 events carry window addresses WITHOUT the 0x that
+# `hyprctl clients -j` prints (verified live on Hyprland 0.56.2), so the
+# fixture uses the bare form: a filter keyed on "0xa" never matches anything.
 active_file="$tmpdir/self-event-active.json"
 active_calls="$tmpdir/self-event-active.calls"
 printf '%s\n' '{"id":1}' >"$active_file"
@@ -565,8 +587,9 @@ printf '%s\n' '{"id":3}' >'$active_file'
 cp '$tmpdir/ws-fallback.json' '$tmpdir/ws.json'
 echo 'destroyworkspace>>2'
 sleep 0.06
-echo 'movewindow>>0xa,1'
-echo 'movewindowv2>>0xa,1,1'
+echo 'movewindow>>a,1'
+echo 'movewindowv2>>a,1,1'
+echo 'moveworkspacev2>>1,1,eDP-1'
 echo 'destroyworkspace>>3'
 echo 'destroyworkspacev2>>3,3'
 sleep 0.5
@@ -593,5 +616,32 @@ wait "$locker" 2>/dev/null || true
 grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
   fail "watch dropped its round while the lock was busy, log=$(cat "$log")"
 pass "watch retries a compact skipped by the lock"
+
+# --- watch: stopping the daemon takes its socat reader down with it ----------
+# The plugin service (and systemctl stop) SIGTERM the daemon. bash dies, but
+# the process-substitution socat kept its connection to Hyprland until the
+# next event hit its dead pipe. The listener here stays open and silent, so a
+# leaked reader would still be sitting on the socket when we look.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$COMPACT_WS" "$HOLE_CLIENTS"
+mkdir -p "$(dirname "$SOCK")"; rm -f "$SOCK"
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sleep 4" &
+listener=$!
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_SETTLE_US=50000 \
+  PATH="$stub:$PATH" "$PLONK" --watch >/dev/null 2>&1 &
+daemon=$!
+for _ in $(seq 1 40); do pgrep -f "UNIX-CONNECT:$SOCK" >/dev/null && break; sleep 0.05; done
+pgrep -f "UNIX-CONNECT:$SOCK" >/dev/null || fail "daemon never connected its socat reader"
+kill -TERM "$daemon"
+wait "$daemon" 2>/dev/null || true
+for _ in $(seq 1 20); do pgrep -f "UNIX-CONNECT:$SOCK" >/dev/null || break; sleep 0.05; done
+if pgrep -f "UNIX-CONNECT:$SOCK" >/dev/null; then
+  pkill -f "UNIX-CONNECT:$SOCK" || true
+  kill "$listener" 2>/dev/null || true
+  fail "socat reader leaked after the daemon was stopped"
+fi
+kill "$listener" 2>/dev/null || true
+wait "$listener" 2>/dev/null || true
+pass "stopping the watcher kills its socat reader"
 
 echo "all tests passed"
