@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # plonk — collapse Hyprland workspaces down to the lowest numbers.
 #
-# Prefers hl.dsp.workspace.change_id so the workspace stays on its monitor
-# and keeps its layout. Falls back to moving windows when the target ID is
-# already taken (empty persistent workspace) or change_id is unavailable.
+# Renumbers by moving the windows and pinning the new workspace to the old
+# monitor (every bar handles those events). PLONK_RENUMBER=change_id (or
+# ~/.config/plonk/renumber) uses hl.dsp.workspace.change_id instead, which
+# keeps the tiling layout but ghosts the old number in bars that ignore the
+# changeworkspaceid event (stock Omarchy bar on Quickshell 0.3.1). change_id
+# still falls back to moving when the target ID is taken or it fails.
 # Special/scratchpad workspaces (id < 1) and named workspaces are left alone.
 # Titles from the nixfred.workspace-names plugin (workspace-names.json, keyed
 # by id) travel with the workspace when it is renumbered; override the file
@@ -44,6 +47,41 @@ elif [[ -n ${HOME:-} ]]; then
 else
   STATE_DIR=
 fi
+
+# How a workspace gets its new number. "move" (default) moves the windows and
+# pins the new workspace to the old monitor; every bar follows the resulting
+# create/destroy events. "change_id" uses hl.dsp.workspace.change_id, which
+# keeps the tiling layout but emits changeworkspaceid — an event Quickshell
+# 0.3.1 ignores, so the stock Omarchy bar shows the old number as a ghost.
+# Opt in with PLONK_RENUMBER=change_id, or a file whose first line is
+# change_id at $XDG_CONFIG_HOME/plonk/renumber (~/.config/plonk/renumber).
+# Re-read on every compact, so the daemon follows the file without a restart.
+if [[ -n ${XDG_CONFIG_HOME:-} ]]; then
+  RENUMBER_FILE=$XDG_CONFIG_HOME/plonk/renumber
+elif [[ -n ${HOME:-} ]]; then
+  RENUMBER_FILE=$HOME/.config/plonk/renumber
+else
+  RENUMBER_FILE=
+fi
+RENUMBER=move
+RENUMBER_WARNED=
+read_renumber_mode() {
+  local mode=${PLONK_RENUMBER:-}
+  if [[ -z $mode && -n $RENUMBER_FILE && -f $RENUMBER_FILE && ! -L $RENUMBER_FILE ]]; then
+    IFS= read -r -n 32 mode <"$RENUMBER_FILE" || true
+    mode=${mode//[[:space:]]/}
+  fi
+  case "${mode:-move}" in
+    move|change_id) RENUMBER=${mode:-move} ;;
+    *)
+      if [[ -z $RENUMBER_WARNED ]]; then
+        echo "plonk: unknown renumber mode '$mode' (want move or change_id); moving windows" >&2
+        RENUMBER_WARNED=1
+      fi
+      RENUMBER=move
+      ;;
+  esac
+}
 
 usage() { echo "Usage: plonk [-n|--dry-run] [--notify] | plonk --watch [--notify]" >&2; }
 
@@ -128,6 +166,7 @@ compact() {
 
 compact_unlocked() {
   local active snapshot_active current_active clients workspaces monitors new_active moves target active_seen ws mon active_windows skip_target names_warned=
+  read_renumber_mode
   active=$(hyprctl activeworkspace -j | jq -r '.id')
   [[ $active =~ ^-?[0-9]+$ ]] || { echo "plonk: could not read active workspace" >&2; return 1; }
 
@@ -234,7 +273,7 @@ compact_unlocked() {
 
   renumber() { # src dst mon
     local src=$1 dst=$2 mon=$3 out
-    if [[ -z ${taken[$dst]+x} ]]; then
+    if [[ $RENUMBER == change_id && -z ${taken[$dst]+x} ]]; then
       # hyprctl exits 0 even on failure ("warning: ... ID is taken" /
       # "no such workspace" go to stdout); only the literal "ok" is success.
       out=$(hyprctl dispatch "hl.dsp.workspace.change_id({ workspace = \"$src\", id = $dst })" 2>/dev/null || true)

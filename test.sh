@@ -26,6 +26,9 @@ trap 'rm -rf "$tmpdir"' EXIT
 export WORKSPACE_NAMES_FILE="$tmpdir/names-sandbox.json"
 export XDG_CONFIG_HOME="$tmpdir/xdg-sandbox"
 export PLONK_STATE_DIR="$tmpdir/state-sandbox"
+# The suite exercises the change_id path throughout; the default (window
+# moves) and the opt-in mechanics have their own checks below.
+export PLONK_RENUMBER=change_id
 stub="$tmpdir/bin"
 log="$tmpdir/hyprctl.log"
 mkdir -p "$stub"
@@ -214,6 +217,49 @@ err=$(WORKSPACE_NAMES_FILE="$big" run_plonk 2>&1 >/dev/null) || fail "oversized 
 [[ $(stat -c %s "$big") == "$before" ]] || fail "oversized names file was rewritten"
 grep -F 'titles NOT remapped' <<<"$err" >/dev/null || fail "oversized names file must be reported, got: $err"
 pass "oversized names file is skipped and reported"
+
+# --- renumber strategy: window moves by default, change_id opt-in -----------
+# Quickshell 0.3.1 ignores changeworkspaceid, so the stock Omarchy bar shows
+# the old number as a ghost after change_id. The default must therefore move
+# windows; change_id is opt-in via env or ~/.config/plonk/renumber.
+write_stub '{"id":7}' \
+  '[{"name":"eDP-1"}]' \
+  '[{"id":7,"name":"7","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":2},{"id":4,"name":"4","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":3}},{"address":"0xb","workspace":{"id":3}},{"address":"0xc","workspace":{"id":4}},{"address":"0xd","workspace":{"id":7}}]'
+env -u PLONK_RENUMBER PATH="$stub:$PATH" "$PLONK" >/dev/null || fail "default run must succeed"
+grep -F 'change_id' "$log" >/dev/null && fail "default must not use change_id, log=$(cat "$log")"
+grep -Fx 'dispatch hl.dsp.window.move({ window = "address:0xa", workspace = "1", follow = false })' "$log" >/dev/null ||
+  fail "default must move windows, log=$(cat "$log")"
+grep -Fx 'dispatch hl.dsp.workspace.move({ workspace = "1", monitor = "eDP-1" })' "$log" >/dev/null ||
+  fail "default must pin the new workspace to its monitor, log=$(cat "$log")"
+pass "renumbers by moving windows unless change_id is opted in"
+
+mkdir -p "$XDG_CONFIG_HOME/plonk"
+printf 'change_id\n' >"$XDG_CONFIG_HOME/plonk/renumber"
+: >"$log"
+env -u PLONK_RENUMBER PATH="$stub:$PATH" "$PLONK" >/dev/null || fail "config-file run must succeed"
+grep -F 'change_id({ workspace = "3", id = 1 })' "$log" >/dev/null || fail "renumber file must enable change_id, log=$(cat "$log")"
+grep -F 'window.move' "$log" >/dev/null && fail "change_id mode must not move windows, log=$(cat "$log")"
+pass "~/.config/plonk/renumber opts into change_id"
+
+rm -f "$XDG_CONFIG_HOME/plonk/renumber"; printf 'change_id\n' >"$tmpdir/renumber-target"
+ln -s "$tmpdir/renumber-target" "$XDG_CONFIG_HOME/plonk/renumber"
+: >"$log"
+env -u PLONK_RENUMBER PATH="$stub:$PATH" "$PLONK" >/dev/null || fail "symlinked renumber file run must succeed"
+grep -F 'change_id' "$log" >/dev/null && fail "a symlinked renumber file must be ignored, log=$(cat "$log")"
+pass "symlinked renumber file is ignored"
+
+rm -f "$XDG_CONFIG_HOME/plonk/renumber"; printf 'teleport\n' >"$XDG_CONFIG_HOME/plonk/renumber"
+: >"$log"
+err=$(env -u PLONK_RENUMBER PATH="$stub:$PATH" "$PLONK" 2>&1 >/dev/null) || fail "invalid renumber mode must not fail the run"
+grep -F 'unknown renumber mode' <<<"$err" >/dev/null || fail "invalid renumber mode must be reported, got: $err"
+grep -F 'window.move' "$log" >/dev/null || fail "invalid renumber mode must fall back to moving windows, log=$(cat "$log")"
+pass "unknown renumber mode warns and moves windows"
+rm -f "$XDG_CONFIG_HOME/plonk/renumber"
+: >"$log"
+env PLONK_RENUMBER=change_id PATH="$stub:$PATH" "$PLONK" >/dev/null
+grep -F 'change_id({ workspace = "3", id = 1 })' "$log" >/dev/null || fail "PLONK_RENUMBER=change_id must enable change_id, log=$(cat "$log")"
+pass "PLONK_RENUMBER=change_id opts into change_id"
 
 # names file missing -> no-op, no error
 : >"$log"

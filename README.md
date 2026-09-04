@@ -48,7 +48,9 @@ It is safe to bind and safe to mash: once the number line is compact, another ru
 
 Hyprland workspace IDs are global. Plonk reads the compositor's workspace and client state, sorts occupied numeric workspaces, and assigns the lowest available IDs in order.
 
-When the destination is free, it prefers `hl.dsp.workspace.change_id`: the workspace keeps its monitor, windows, and tiling layout. If an empty persistent workspace already owns the target ID—or the Lua dispatcher is unavailable—Plonk falls back to moving the windows and pins the destination to the original monitor.
+By default a workspace is renumbered by moving its windows to the new number and pinning that workspace to the original monitor. Every bar follows the create/destroy events this produces, so the number line updates everywhere.
+
+Hyprland also has `hl.dsp.workspace.change_id`, which renumbers in place and keeps the tiling layout. It is **opt-in** because it emits `changeworkspaceid`, an event Quickshell 0.3.1 ignores: the stock Omarchy bar keeps showing the old number as a ghost and the renumbered workspace as empty until something else refreshes it. If your bar handles that event (for example [nixfred.workspace-names](https://github.com/nixfred/workspace-names)), turn it on with the environment variable `PLONK_RENUMBER=change_id`, or put `change_id` on the first line of `~/.config/plonk/renumber` (the plugin and the daemon re-read it on every compact). When the target ID is held by an empty persistent workspace, or `change_id` fails, Plonk moves the windows instead.
 
 Your active workspace follows its new number, so the desktop does not pull focus out from under you.
 
@@ -69,7 +71,7 @@ For example, workspaces 3 and 5 on `eDP-1` plus 7 and 8 on `HDMI-A-1` become 1, 
 - Titles from the [nixfred.workspace-names](https://github.com/nixfred/workspace-names) plugin (`~/.config/omarchy/workspace-names.json`, keyed by workspace id) **travel with their workspace** when it is renumbered. The file is snapshotted before every rewrite (last 20 in `~/.local/state/plonk/names-backups/`), an unnamed workspace arriving on a slot never deletes the slot's title, and plonk never removes a title on its own. Override the path with `WORKSPACE_NAMES_FILE`.
 - If you were sitting on an empty workspace above the pack, you land on the first free slot.
 - Silent by default: it just does its work. Add `--notify` for a short desktop notification (`Plonked 3 workspaces` / `Already Plonked!`) via `omarchy-notification-send` or `notify-send` when present.
-- Window contents and tiling are preserved when the native ID-change dispatcher is available.
+- Window contents are preserved; tiling layout is preserved too when you opt into `change_id` (see above).
 - `--dry-run` prints the complete move plan without dispatching anything.
 
 ## Install as an Omarchy plugin
@@ -109,7 +111,7 @@ Clone the repository, pin the release you reviewed, and install the script from 
 git clone https://github.com/nixfred/plonk.git
 cd plonk
 git tag --list          # pick a release
-git checkout v1.1.0     # pin it, then read plonk before installing
+git checkout v1.1.1     # pin it, then read plonk before installing
 install -Dm755 plonk ~/.local/bin/plonk
 ```
 
