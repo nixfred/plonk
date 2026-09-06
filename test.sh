@@ -216,6 +216,65 @@ WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null 2>&1
 rm -f "$track"
 pass "window-owner map is never written through a symlink"
 
+# --- automatic titles never outrank the ones you typed ----------------------
+# The workspace-names plugin names an unnamed workspace from its window titles
+# within a second, so "the destination already has a title" cannot be what
+# stops a carry — it would make this a race the automatic name usually wins.
+# Titles it wrote are listed in "_auto".
+
+# A typed title displaces an automatic one at the destination.
+write_stub '{"id":5}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":5,"name":"5","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xb","workspace":{"id":1}},{"address":"0xa","workspace":{"id":5}}]'
+printf '%s\n' '{"0xa":3,"0xb":1}' >"$track"
+printf '%s\n' '{"1":"Home","3":"Typed","5":"AutoLabel","_auto":["5"]}' >"$names"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -cS . "$names") == '{"1":"Home","2":"Typed"}' ]] || fail "a typed title must displace an automatic one, got: $(cat "$names")"
+pass "a typed title displaces an automatic title at the destination"
+
+# ...and never the other way round.
+printf '%s\n' '{"0xa":3,"0xb":1}' >"$track"
+printf '%s\n' '{"1":"Home","3":"AutoLabel","5":"Typed","_auto":["3"]}' >"$names"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -cS . "$names") == '{"1":"Home","2":"Typed"}' ]] || fail "an automatic title must not displace a typed one, got: $(cat "$names")"
+pass "an automatic title never displaces a typed one"
+
+# An automatic label reserves no number: it would leave a permanent gap for
+# every workspace that ever held a window.
+write_stub '{"id":3}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":0},{"id":3,"name":"3","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":3}}]'
+printf '%s\n' '{}' >"$track"
+printf '%s\n' '{"1":"AutoLabel","_auto":["1"]}' >"$names"
+out=$(WORKSPACE_NAMES_FILE="$names" run_plonk)
+grep -F 'plonked workspace 3 -> 1' <<<"$out" >/dev/null || fail "an automatic label must not reserve a slot, got: $out"
+printf '%s\n' '{"1":"Typed"}' >"$names"
+out=$(WORKSPACE_NAMES_FILE="$names" run_plonk)
+grep -F 'plonked workspace 3 -> 2' <<<"$out" >/dev/null || fail "a typed title must still reserve its slot, got: $out"
+pass "automatic labels reserve no slot; typed titles still do"
+
+# A dead automatic label is litter, not history: dropped, never archived.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":1}}]'
+printf '%s\n' '{}' >"$track"
+printf '%s\n' '{"1":"Typed","3":"AutoLabel","4":"TypedGone","_auto":["3"]}' >"$names"
+PLONK_EMPTY_NAMES=archive WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -r 'has("3")' "$names") == false && $(jq -r 'has("_auto")' "$names") == false ]] || fail "a dead automatic label must be dropped, got: $(cat "$names")"
+[[ $(jq -c '[._plonk_archived_names[].name]' "$names") == '["TypedGone"]' ]] || fail "only typed titles are archived, got: $(cat "$names")"
+pass "a vanished workspace's automatic label is dropped, its typed title archived"
+
+# The mark travels with a renumber, or a renumbered automatic label would
+# start outranking the titles you typed.
+write_stub '{"id":3}' '[{"name":"eDP-1"}]' \
+  '[{"id":3,"name":"3","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":3}}]'
+printf '%s\n' '{}' >"$track"
+printf '%s\n' '{"3":"AutoLabel","_auto":["3"]}' >"$names"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -cS . "$names") == '{"1":"AutoLabel","_auto":["1"]}' ]] || fail "the automatic mark must follow the renumber, got: $(cat "$names")"
+pass "the automatic mark follows its title through a renumber"
+
 # notifications are OPT-IN (Fred 2026-09-04: "it should just do its work
 # without reporting a notification"). Without --notify nothing is sent, even
 # when a notifier is on PATH and even for a no-op run.

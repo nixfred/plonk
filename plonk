@@ -10,9 +10,10 @@
 # Special/scratchpad workspaces (id < 1) and named workspaces are left alone.
 # Titles from the nixfred.workspace-names plugin (workspace-names.json, keyed
 # by id) travel with the workspace when it is renumbered, and follow their
-# windows when you move the last one off a titled workspace (the title never
-# overwrites one the destination already has). Override the file with
-# WORKSPACE_NAMES_FILE.
+# windows when you move the last one off a titled workspace. A title you typed
+# outranks one the plugin wrote from a window title (those are listed in the
+# file's "_auto"), which is also why an automatic label reserves no slot and is
+# dropped rather than archived. Override the file with WORKSPACE_NAMES_FILE.
 # If you were sitting on an empty workspace you land on the first free slot
 # after the compacted ones. Silent by default: --notify adds a desktop
 # notification (omarchy-notification-send / notify-send) in any mode.
@@ -316,7 +317,16 @@ compact_unlocked() {
     jq -e --arg s "$src" 'has($s)' "$NAMES_FILE" >/dev/null 2>&1 || return 0
     backup_names
     tmp=$(mktemp "${NAMES_FILE}.XXXXXX") || return 0
-    if jq --arg s "$src" --arg d "$dst" '.[$d] = .[$s] | del(.[$s])' "$NAMES_FILE" >"$tmp" 2>/dev/null; then
+    # "_auto" (written by the workspace-names helper) lists the slots whose name
+    # came from a window title rather than from the user. It has to move with
+    # the name, or a renumbered automatic name would start outranking the ones
+    # you typed.
+    if jq --arg s "$src" --arg d "$dst" '
+         (if (._auto | type) == "array" then ._auto else [] end) as $auto
+         | .[$d] = .[$s] | del(.[$s])
+         | ._auto = (if ($auto | index($s)) then (($auto - [$s, $d]) + [$d])
+                     else ($auto - [$s, $d]) end)
+         | if (._auto | length) == 0 then del(._auto) else . end' "$NAMES_FILE" >"$tmp" 2>/dev/null; then
       mv "$tmp" "$NAMES_FILE"
     else
       rm -f "$tmp"
@@ -352,9 +362,19 @@ compact_unlocked() {
 
   # A title belongs to the workspace, not to the number. When the last window
   # leaves workspace N (SUPER+SHIFT+#), N's title goes with it to wherever
-  # those windows are now — unless that workspace already has a title of its
-  # own, which is never overwritten. Windows that were merely CLOSED move
-  # nothing: the title stays put (or is archived) exactly as before.
+  # those windows are now. Windows that were merely CLOSED move nothing: the
+  # title stays put (or is archived) exactly as before.
+  #
+  # What happens when the destination already has a title comes down to who
+  # wrote it. The workspace-names plugin names an unnamed workspace from its
+  # window titles within a second or so, so "the destination already has a
+  # title" is nearly always true and cannot be the test — that turned this into
+  # a race the automatic name usually won, taking a name the user had typed
+  # with it. Titles the plugin wrote are listed in "_auto", and the rule is
+  # plain: a title you typed outranks an automatic one wherever they meet.
+  #   destination empty            -> carry
+  #   destination automatic, src typed -> carry (the label regenerates)
+  #   anything else                -> leave both alone
   # Emits {"names": <doc>, "carries": [{src, dst, name}]}.
   carry_names() { # names-json
     local prev cur
@@ -362,7 +382,9 @@ compact_unlocked() {
     cur=$(owner_map "$clients") || return 1
     [[ -n $cur ]] || return 1
     jq -c --argjson prev "$prev" --argjson cur "$cur" --argjson ws "$workspaces" '
+      def autolist: (if (._auto | type) == "array" then ._auto else [] end);
       . as $names
+      | ($names | autolist) as $auto
       | [ $names | to_entries[]
           | select(.key | test("^[1-9][0-9]*$"))
           | select(.value | type == "string" and test("\\S"))
@@ -375,15 +397,23 @@ compact_unlocked() {
               | select(. != $src) ] as $landed
           | select(($landed | length) > 0)
           | ($landed | group_by(.) | max_by([length, -(.[0])]) | .[0]) as $dst
-          | {src: $entry.key, dst: ($dst | tostring), name: $entry.value} ]
+          | {src: $entry.key, dst: ($dst | tostring), name: $entry.value,
+             auto: (($auto | index($entry.key)) != null)} ]
         | sort_by(.src | tonumber) as $carries
       | reduce $carries[] as $c ({names: $names, carries: []};
-          if (.names[$c.src] == $c.name)
-             and ((.names[$c.dst] // "") | type == "string")
-             and (((.names[$c.dst] // "") | test("\\S")) | not)
-          then .names = (.names | .[$c.dst] = $c.name | del(.[$c.src]))
-               | .carries += [$c]
-          else . end)' <<<"$1" 2>/dev/null
+          (.names | autolist) as $a
+          | (.names[$c.dst] // "") as $held
+          | if (.names[$c.src] == $c.name)
+               and (($held | type) == "string")
+               and ((($held | test("\\S")) | not)
+                    or (($a | index($c.dst)) != null and ($c.auto | not)))
+            then .names = (.names
+                   | .[$c.dst] = $c.name | del(.[$c.src])
+                   | ._auto = (if $c.auto then (($a - [$c.src, $c.dst]) + [$c.dst])
+                               else ($a - [$c.src, $c.dst]) end)
+                   | if (._auto | length) == 0 then del(._auto) else . end)
+                 | .carries += [$c]
+            else . end)' <<<"$1" 2>/dev/null
   }
 
   renumber() { # src dst mon
@@ -484,6 +514,28 @@ compact_unlocked() {
     fi
   fi
 
+  # An automatic label for a workspace that no longer exists is litter, not
+  # history: it says what some window was called, the plugin writes a fresh one
+  # the moment a workspace has windows again, and archiving them is what buried
+  # the real names under a pile of "brave" and "fixes". Drop them (in both
+  # modes) before the archive step ever sees them.
+  if [[ -n $names_doc ]]; then
+    names_doc=$(jq -c --argjson ws "$workspaces" --argjson active "$active" '
+      def autolist: (if (._auto | type) == "array" then ._auto else [] end);
+      autolist as $auto
+      | [ $auto[] | select(type == "string" and test("^[1-9][0-9]*$"))
+          | select((tonumber) as $id
+                   | $id != $active and ([$ws[] | select(.id == $id)] | length == 0)) ] as $dead
+      | if ($dead | length) == 0 then . else
+          delpaths($dead | map([.]))
+          | ._auto = ($auto - $dead)
+          | if (._auto | length) == 0 then del(._auto) else . end
+        end' <<<"$names_doc" 2>/dev/null) || {
+          echo "plonk: cannot read workspace titles; leaving them untouched" >&2
+          return 1
+        }
+  fi
+
   # Opt-in gap closure: keep names from vanished workspaces in the same
   # atomic document, but release their numeric slots. Never archive a live
   # workspace (including an empty one displayed on another monitor).
@@ -522,14 +574,21 @@ compact_unlocked() {
   # A custom title left on an empty slot belongs to that slot until the user
   # clears it. Reserve it rather than overwrite it with an incoming title.
   # Occupied workspaces still carry their titles as they compact in order.
+  # An AUTOMATIC label reserves nothing: it was written from a window title, and
+  # letting one hold a number would leave a permanent gap in the pack for every
+  # workspace that ever had a window in it.
   if [[ -n $names_for_slots ]]; then
     while IFS= read -r id; do
       [[ $id =~ ^[0-9]+$ ]] && blocked[$id]=1
     done < <(jq -r --argjson ws "$workspaces" '
-      if type == "object" then to_entries[]
+      if type == "object" then
+      (if (._auto | type) == "array" then ._auto else [] end) as $auto
+      | to_entries[]
       | select(.key | test("^[1-9][0-9]*$"))
       | select(.value | type == "string" and test("\\S"))
-      | (.key | tonumber) as $id
+      | .key as $key
+      | select(($auto | index($key)) == null)
+      | ($key | tonumber) as $id
       | select([$ws[] | select(.id == $id and .windows > 0)] | length == 0)
       | $id else empty end' <<<"$names_for_slots" 2>/dev/null)
   fi
