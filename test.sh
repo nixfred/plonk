@@ -157,6 +157,65 @@ pass "plonk never deletes a title on its own"
 ls "$tmpdir/state-sandbox/names-backups"/workspace-names.*.json >/dev/null 2>&1 || fail "a names backup is written before any remap"
 pass "names file is backed up before plonk rewrites it"
 
+# --- a title follows its windows -------------------------------------------
+# SUPER+SHIFT+5 moves the last window off workspace 3: the workspace dies and
+# its title must land where the window did, not rot on the old number.
+track="$tmpdir/state-sandbox/window-owners.json"
+mkdir -p "$tmpdir/state-sandbox"
+write_stub '{"id":5}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":5,"name":"5","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xb","workspace":{"id":1}},{"address":"0xa","workspace":{"id":5}}]'
+printf '%s\n' '{"0xa":3,"0xb":1}' >"$track"
+printf '%s\n' '{"1":"Home","3":"Brave"}' >"$names"
+out=$(WORKSPACE_NAMES_FILE="$names" run_plonk)
+[[ $(jq -cS . "$names") == '{"1":"Home","2":"Brave"}' ]] || fail "title must follow its window (3 -> 5 -> compacted to 2), got: $(cat "$names")"
+grep -F 'carried title "Brave" 3 -> 5' <<<"$out" >/dev/null || fail "the carry must be reported, got: $out"
+pass "a title follows its windows when the last one is moved away"
+
+# The map is written for the NEXT round: after the compact above the window
+# lives on 2, so a later move is measured from there.
+[[ $(jq -r '."0xa"' "$track") == 5 ]] || fail "window-owner map must be refreshed after a compact, got: $(cat "$track")"
+pass "window-owner map is refreshed after every compact"
+
+# A window that was CLOSED (not moved) carries nothing: the title stays put.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xb","workspace":{"id":1}}]'
+printf '%s\n' '{"0xa":3,"0xb":1}' >"$track"
+printf '%s\n' '{"1":"Home","3":"Brave"}' >"$names"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -cS . "$names") == '{"1":"Home","3":"Brave"}' ]] || fail "a closed window must not move a title, got: $(cat "$names")"
+pass "closing the last window leaves the title where it was"
+
+# The destination's own title always wins; the orphan stays where it is.
+write_stub '{"id":5}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":5,"name":"5","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xb","workspace":{"id":1}},{"address":"0xa","workspace":{"id":5}}]'
+printf '%s\n' '{"0xa":3,"0xb":1}' >"$track"
+printf '%s\n' '{"1":"Home","3":"Brave","5":"Mine"}' >"$names"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -cS . "$names") == '{"1":"Home","2":"Mine","3":"Brave"}' ]] || fail "an incoming title must not overwrite the destination's own, got: $(cat "$names")"
+pass "a carried title never overwrites the destination's own title"
+
+# --dry-run plans the carry and writes nothing.
+printf '%s\n' '{"0xa":3,"0xb":1}' >"$track"
+printf '%s\n' '{"1":"Home","3":"Brave"}' >"$names"
+before=$(cat "$names")
+out=$(WORKSPACE_NAMES_FILE="$names" run_plonk --dry-run)
+grep -F 'would carry title "Brave" 3 -> 5' <<<"$out" >/dev/null || fail "dry run must plan the carry, got: $out"
+[[ $(cat "$names") == "$before" ]] || fail "dry run must not touch the names file"
+[[ $(jq -r '."0xa"' "$track") == 3 ]] || fail "dry run must not touch the window-owner map"
+pass "--dry-run plans the carry without writing"
+
+# A planted symlink at the map path is never followed or written through.
+canary_map="$tmpdir/canary-map.json"; printf '{"0xz":9}\n' >"$canary_map"
+rm -f "$track"; ln -s "$canary_map" "$track"
+printf '%s\n' '{"1":"Home"}' >"$names"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null 2>&1
+[[ $(cat "$canary_map") == '{"0xz":9}' ]] || fail "a symlinked window-owner map must never be written through"
+rm -f "$track"
+pass "window-owner map is never written through a symlink"
+
 # notifications are OPT-IN (Fred 2026-09-04: "it should just do its work
 # without reporting a notification"). Without --notify nothing is sent, even
 # when a notifier is on PATH and even for a no-op run.

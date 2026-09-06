@@ -9,8 +9,10 @@
 # still falls back to moving when the target ID is taken or it fails.
 # Special/scratchpad workspaces (id < 1) and named workspaces are left alone.
 # Titles from the nixfred.workspace-names plugin (workspace-names.json, keyed
-# by id) travel with the workspace when it is renumbered; override the file
-# with WORKSPACE_NAMES_FILE.
+# by id) travel with the workspace when it is renumbered, and follow their
+# windows when you move the last one off a titled workspace (the title never
+# overwrites one the destination already has). Override the file with
+# WORKSPACE_NAMES_FILE.
 # If you were sitting on an empty workspace you land on the first free slot
 # after the compacted ones. Silent by default: --notify adds a desktop
 # notification (omarchy-notification-send / notify-send) in any mode.
@@ -48,6 +50,14 @@ elif [[ -n ${HOME:-} ]]; then
 else
   STATE_DIR=
 fi
+
+# Window address -> workspace id as of the end of the last compact. Hyprland's
+# move events name only the DESTINATION, and by the time plonk looks the source
+# workspace is already gone, so this is the only way to answer "where did the
+# windows of workspace 3 go?" and send its title after them. No state dir means
+# no map: titles then behave as they did before (sticky to the number).
+TRACK_FILE=
+[[ -n $STATE_DIR ]] && TRACK_FILE=$STATE_DIR/window-owners.json
 
 # Options. Environment wins, then ~/.config/plonk/config (key=value lines,
 # "#" comments), then the legacy one-line ~/.config/plonk/renumber file.
@@ -313,6 +323,69 @@ compact_unlocked() {
     fi
   }
 
+  # The window-owner map from the last compact. Same hardening as the names
+  # file: regular file only, never a symlink, bounded size. Anything odd reads
+  # as "no map", which only means titles do not follow their windows.
+  track_read() {
+    local size
+    [[ -n $TRACK_FILE && -f $TRACK_FILE && ! -L $TRACK_FILE ]] || { echo '{}'; return 0; }
+    size=$(stat -c %s -- "$TRACK_FILE" 2>/dev/null) || { echo '{}'; return 0; }
+    (( size <= ${PLONK_NAMES_MAX_BYTES:-1048576} )) || { echo '{}'; return 0; }
+    jq -c 'if type == "object" then . else {} end' "$TRACK_FILE" 2>/dev/null || echo '{}'
+  }
+
+  owner_map() { # clients-json -> {"0xaddr": workspace-id}
+    jq -c 'map(select(.address != null and ((.workspace.id? // 0) > 0)))
+           | map({key: .address, value: .workspace.id}) | from_entries' <<<"$1" 2>/dev/null
+  }
+
+  track_write() { # clients-json
+    local tmp doc
+    state_dir_ok || return 0
+    [[ -n $TRACK_FILE && ! -L $TRACK_FILE ]] || return 0
+    doc=$(owner_map "$1") || return 0
+    [[ -n $doc ]] || return 0
+    tmp=$(mktemp "${TRACK_FILE}.XXXXXX" 2>/dev/null) || return 0
+    if printf '%s\n' "$doc" > "$tmp"; then mv -- "$tmp" "$TRACK_FILE" || rm -f -- "$tmp"
+    else rm -f -- "$tmp"; fi
+  }
+
+  # A title belongs to the workspace, not to the number. When the last window
+  # leaves workspace N (SUPER+SHIFT+#), N's title goes with it to wherever
+  # those windows are now — unless that workspace already has a title of its
+  # own, which is never overwritten. Windows that were merely CLOSED move
+  # nothing: the title stays put (or is archived) exactly as before.
+  # Emits {"names": <doc>, "carries": [{src, dst, name}]}.
+  carry_names() { # names-json
+    local prev cur
+    prev=$(track_read)
+    cur=$(owner_map "$clients") || return 1
+    [[ -n $cur ]] || return 1
+    jq -c --argjson prev "$prev" --argjson cur "$cur" --argjson ws "$workspaces" '
+      . as $names
+      | [ $names | to_entries[]
+          | select(.key | test("^[1-9][0-9]*$"))
+          | select(.value | type == "string" and test("\\S"))
+          | . as $entry
+          | (.key | tonumber) as $src
+          | select(([$ws[] | select(.id == $src) | .windows] | first // 0) == 0)
+          | [ $prev | to_entries[]
+              | select((.value | tonumber? // -1) == $src)
+              | $cur[.key] // empty
+              | select(. != $src) ] as $landed
+          | select(($landed | length) > 0)
+          | ($landed | group_by(.) | max_by([length, -(.[0])]) | .[0]) as $dst
+          | {src: $entry.key, dst: ($dst | tostring), name: $entry.value} ]
+        | sort_by(.src | tonumber) as $carries
+      | reduce $carries[] as $c ({names: $names, carries: []};
+          if (.names[$c.src] == $c.name)
+             and ((.names[$c.dst] // "") | type == "string")
+             and (((.names[$c.dst] // "") | test("\\S")) | not)
+          then .names = (.names | .[$c.dst] = $c.name | del(.[$c.src]))
+               | .carries += [$c]
+          else . end)' <<<"$1" 2>/dev/null
+  }
+
   renumber() { # src dst mon
     local src=$1 dst=$2 mon=$3 out
     if [[ $RENUMBER == change_id && -z ${taken[$dst]+x} ]]; then
@@ -387,14 +460,36 @@ compact_unlocked() {
     skip_target=$active
   fi
 
+  # Everything that rewrites the titles document happens here, in one place
+  # and one atomic write: first titles follow their windows, then (opt-in)
+  # the titles of workspaces that vanished go to the archive.
+  local names_for_slots= names_doc= names_before= carried carry_lines archived_names tmp_names
+  if names_file_usable && [[ -s $NAMES_FILE ]] && jq -e 'type == "object"' "$NAMES_FILE" >/dev/null 2>&1; then
+    names_doc=$(cat -- "$NAMES_FILE")
+    names_before=$names_doc
+  fi
+
+  # A title follows its windows: move the last window off a named workspace
+  # and the title lands where the window did.
+  if [[ -n $names_doc ]] && carried=$(carry_names "$names_doc") && [[ -n $carried ]]; then
+    carry_lines=$(jq -r '.carries[] | "\(.name)\t\(.src)\t\(.dst)"' <<<"$carried" 2>/dev/null || true)
+    if [[ -n $carry_lines ]]; then
+      names_doc=$(jq -c '.names' <<<"$carried")
+      while IFS=$'\t' read -r cname csrc cdst; do
+        [[ -n $cname ]] || continue
+        if ((dry)); then echo "would carry title \"$cname\" $csrc -> $cdst"
+        elif ((quiet)); then echo "plonk: carried title \"$cname\" $csrc -> $cdst" >&2
+        else echo "carried title \"$cname\" $csrc -> $cdst"; fi
+      done <<<"$carry_lines"
+    fi
+  fi
+
   # Opt-in gap closure: keep names from vanished workspaces in the same
   # atomic document, but release their numeric slots. Never archive a live
   # workspace (including an empty one displayed on another monitor).
-  local names_for_slots= archived_names tmp_names
-  if [[ $EMPTY_NAMES == archive ]] && names_file_usable; then
+  if [[ -n $names_doc && $EMPTY_NAMES == archive ]]; then
     archived_names=$(jq --argjson ws "$workspaces" --argjson active "$active" '
-      if type != "object" then error("names must be an object") else . end
-      | if has("_plonk_archived_names") and (._plonk_archived_names | type) != "array"
+      if has("_plonk_archived_names") and (._plonk_archived_names | type) != "array"
         then error("invalid names archive") else . end
       | [to_entries[]
          | select(.key | test("^[1-9][0-9]*$"))
@@ -405,28 +500,29 @@ compact_unlocked() {
           ._plonk_archived_names = ((._plonk_archived_names // [])
             + ($gone | map({workspace: .key, name: .value})) | unique_by([.workspace, .name]))
           | delpaths($gone | map([.key]))
-        end' "$NAMES_FILE" 2>/dev/null) || {
+        end' <<<"$names_doc" 2>/dev/null) || {
           echo "plonk: cannot archive workspace names; leaving them untouched" >&2
           return 1
         }
-    names_for_slots=$archived_names
-    if ((dry == 0)) && [[ $(jq -cS . <<<"$archived_names") != $(jq -cS . "$NAMES_FILE") ]]; then
-      backup_names
-      tmp_names=$(mktemp "${NAMES_FILE}.XXXXXX") || return 1
-      if printf '%s\n' "$archived_names" > "$tmp_names" && mv -- "$tmp_names" "$NAMES_FILE"; then
-        :
-      else
-        rm -f -- "$tmp_names"
-        return 1
-      fi
+    names_doc=$archived_names
+  fi
+
+  if [[ -n $names_doc ]] && ((dry == 0)) && [[ $(jq -cS . <<<"$names_doc") != $(jq -cS . <<<"$names_before") ]]; then
+    backup_names
+    tmp_names=$(mktemp "${NAMES_FILE}.XXXXXX") || return 1
+    if printf '%s\n' "$names_doc" > "$tmp_names" && mv -- "$tmp_names" "$NAMES_FILE"; then
+      :
+    else
+      rm -f -- "$tmp_names"
+      return 1
     fi
   fi
+  names_for_slots=$names_doc
 
   # A custom title left on an empty slot belongs to that slot until the user
   # clears it. Reserve it rather than overwrite it with an incoming title.
   # Occupied workspaces still carry their titles as they compact in order.
-  if names_file_usable; then
-    [[ -n $names_for_slots ]] || names_for_slots=$(cat -- "$NAMES_FILE")
+  if [[ -n $names_for_slots ]]; then
     while IFS= read -r id; do
       [[ $id =~ ^[0-9]+$ ]] && blocked[$id]=1
     done < <(jq -r --argjson ws "$workspaces" '
@@ -475,6 +571,13 @@ compact_unlocked() {
       hypr_dispatch "hl.dsp.focus({ workspace = \"$new_active\" })" workspace "$new_active"
     fi
   fi
+  # Remember where every window sits now, so the next round can send a title
+  # after its windows. After a compact the ids have changed: re-read.
+  if ((dry == 0)); then
+    if ((moves == 0)); then track_write "$clients"
+    else track_write "$(hyprctl clients -j 2>/dev/null || echo '[]')"; fi
+  fi
+
   # Silent unless --notify was given: plonk does its work without reporting.
   if ((moves == 0)); then
     ((quiet)) || echo "plonk: Already Plonked!"
