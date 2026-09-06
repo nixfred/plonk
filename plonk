@@ -381,6 +381,21 @@ compact_unlocked() {
     skip_target=$active
   fi
 
+  # A custom title left on an empty slot belongs to that slot until the user
+  # clears it. Reserve it rather than overwrite it with an incoming title.
+  # Occupied workspaces still carry their titles as they compact in order.
+  if names_file_usable; then
+    while IFS= read -r id; do
+      [[ $id =~ ^[0-9]+$ ]] && blocked[$id]=1
+    done < <(jq -r --argjson ws "$workspaces" '
+      if type == "object" then to_entries[]
+      | select(.key | test("^[1-9][0-9]*$"))
+      | select(.value | type == "string" and test("\\S"))
+      | (.key | tonumber) as $id
+      | select([$ws[] | select(.id == $id and .windows > 0)] | length == 0)
+      | $id else empty end' "$NAMES_FILE" 2>/dev/null)
+  fi
+
   target=1
   active_seen=0
   while IFS=$'\t' read -r ws mon; do

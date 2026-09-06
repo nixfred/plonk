@@ -69,6 +69,7 @@ For example, workspaces 3 and 5 on `eDP-1` plus 7 and 8 on `HDMI-A-1` become 1, 
 - Special and scratchpad workspaces (`id < 1`) are ignored.
 - Named workspaces are ignored.
 - Titles from the [nixfred.workspace-names](https://github.com/nixfred/workspace-names) plugin (`~/.config/omarchy/workspace-names.json`, keyed by workspace id) **travel with their workspace** when it is renumbered. The file is snapshotted before every rewrite (last 20 in `~/.local/state/plonk/names-backups/`), an unnamed workspace arriving on a slot never deletes the slot's title, and plonk never removes a title on its own. Override the path with `WORKSPACE_NAMES_FILE`.
+- Empty numeric slots with custom titles are reserved: incoming workspaces skip them, so a saved name is never overwritten by another workspace’s title. Clear an unused custom name to release its slot. The Workspace Names helper shares Plonk’s directory lock when saving.
 - If you were sitting on an empty workspace above the pack, you land on the first free slot.
 - Silent by default: it just does its work. Add `--notify` for a short desktop notification (`Plonked 3 workspaces` / `Already Plonked!`) via `omarchy-notification-send` or `notify-send` when present.
 - Window contents are preserved; tiling layout is preserved too when you opt into `change_id` (see above).

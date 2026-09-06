@@ -127,10 +127,10 @@ write_stub '{"id":7}' \
 
 # --- workspace-names.json titles travel with the workspace ------------------
 names="$tmpdir/workspace-names.json"
-printf '%s\n' '{"_config":{"hold":900},"1":"Plonk","3":"Brave","4":"Voice","7":"Blank","9":"Stale"}' >"$names"
+printf '%s\n' '{"_config":{"hold":900},"3":"Brave","4":"Voice","7":"Blank","9":"Stale"}' >"$names"
 : >"$log"
 WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
-[[ $(jq -r '."1"' "$names") == Brave ]] || fail "3 -> 1 carries 'Brave' onto the empty slot (was 'Plonk'), got: $(cat "$names")"
+[[ $(jq -r '."1"' "$names") == Brave ]] || fail "3 -> 1 carries 'Brave' onto an unnamed slot, got: $(cat "$names")"
 [[ $(jq -r '."2"' "$names") == Voice ]] || fail "4 -> 2 carries 'Voice', got: $(cat "$names")"
 [[ $(jq -r '."3"' "$names") == Blank ]] || fail "7 -> 3 carries 'Blank' (overwriting stale 'Brave'), got: $(cat "$names")"
 [[ $(jq -r 'has("4")' "$names") == false && $(jq -r 'has("7")' "$names") == false ]] || fail "old keys removed, got: $(cat "$names")"
@@ -139,6 +139,14 @@ WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
 ls "$tmpdir"/workspace-names.json.* >/dev/null 2>&1 && fail "no temp files left behind"
 grep -F 'rename' "$log" >/dev/null && fail "never touches Hyprland workspace names"
 pass "workspace-names.json titles travel with renumbered workspaces"
+
+# A named incoming workspace must not overwrite a custom title on an empty slot.
+printf '%s\n' '{"1":"Reserved project","3":"Brave","4":"Voice","7":"Blank"}' >"$names"
+: >"$log"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -cS . "$names") == '{"1":"Reserved project","2":"Brave","3":"Voice","4":"Blank"}' ]] || fail "custom slot must survive named arrivals: $(cat "$names")"
+grep -F 'id = 1 })' "$log" >/dev/null && fail "must not compact onto a reserved custom slot"
+pass "custom names on empty slots are protected from incoming workspace names"
 
 # an UNNAMED workspace arriving on a slot never deletes the slot's title
 # (titles are sticky; plonk must never remove a name on its own)
