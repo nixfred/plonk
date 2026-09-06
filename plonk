@@ -13,7 +13,10 @@
 # windows when you move the last one off a titled workspace. A title you typed
 # outranks one the plugin wrote from a window title (those are listed in the
 # file's "_auto"), which is also why an automatic label reserves no slot and is
-# dropped rather than archived. Override the file with WORKSPACE_NAMES_FILE.
+# dropped rather than archived. Move the last window onto a workspace that is
+# already titled and those windows inherit the destination's name: the source
+# title is dropped rather than left holding an empty number out of the pack.
+# Override the file with WORKSPACE_NAMES_FILE.
 # If you were sitting on an empty workspace you land on the first free slot
 # after the compacted ones. Silent by default: --notify adds a desktop
 # notification (omarchy-notification-send / notify-send) in any mode.
@@ -372,10 +375,19 @@ compact_unlocked() {
   # a race the automatic name usually won, taking a name the user had typed
   # with it. Titles the plugin wrote are listed in "_auto", and the rule is
   # plain: a title you typed outranks an automatic one wherever they meet.
-  #   destination empty            -> carry
+  #   destination empty                -> carry
   #   destination automatic, src typed -> carry (the label regenerates)
-  #   anything else                -> leave both alone
-  # Emits {"names": <doc>, "carries": [{src, dst, name}]}.
+  #   destination titled, cannot displace -> DROP the source title
+  #
+  # That last line is the "absorbed" case: you moved the last window onto a
+  # workspace that already has a name, so those windows have inherited the
+  # destination's name and the source title has nothing left to describe.
+  # Leaving it pinned to the number it came from was worse than useless — a
+  # typed title reserves its slot, so a dead name held an empty number out of
+  # the pack permanently and plonk could never compact through it. The title
+  # lost; it lets go. Only a title whose windows actually MOVED is dropped:
+  # closing the last window still leaves the title alone.
+  # Emits {"names": <doc>, "carries": [...], "drops": [{src, dst, name, held}]}.
   carry_names() { # names-json
     local prev cur
     prev=$(track_read)
@@ -400,20 +412,25 @@ compact_unlocked() {
           | {src: $entry.key, dst: ($dst | tostring), name: $entry.value,
              auto: (($auto | index($entry.key)) != null)} ]
         | sort_by(.src | tonumber) as $carries
-      | reduce $carries[] as $c ({names: $names, carries: []};
+      | reduce $carries[] as $c ({names: $names, carries: [], drops: []};
           (.names | autolist) as $a
           | (.names[$c.dst] // "") as $held
-          | if (.names[$c.src] == $c.name)
-               and (($held | type) == "string")
-               and ((($held | test("\\S")) | not)
-                    or (($a | index($c.dst)) != null and ($c.auto | not)))
+          | if (.names[$c.src] != $c.name) or (($held | type) != "string")
+            then .
+            elif (($held | test("\\S")) | not)
+                 or (($a | index($c.dst)) != null and ($c.auto | not))
             then .names = (.names
                    | .[$c.dst] = $c.name | del(.[$c.src])
                    | ._auto = (if $c.auto then (($a - [$c.src, $c.dst]) + [$c.dst])
                                else ($a - [$c.src, $c.dst]) end)
                    | if (._auto | length) == 0 then del(._auto) else . end)
                  | .carries += [$c]
-            else . end)' <<<"$1" 2>/dev/null
+            else .names = (.names
+                   | del(.[$c.src])
+                   | ._auto = ($a - [$c.src])
+                   | if (._auto | length) == 0 then del(._auto) else . end)
+                 | .drops += [$c + {held: $held}]
+            end)' <<<"$1" 2>/dev/null
   }
 
   renumber() { # src dst mon
@@ -502,14 +519,22 @@ compact_unlocked() {
   # A title follows its windows: move the last window off a named workspace
   # and the title lands where the window did.
   if [[ -n $names_doc ]] && carried=$(carry_names "$names_doc") && [[ -n $carried ]]; then
-    carry_lines=$(jq -r '.carries[] | "\(.name)\t\(.src)\t\(.dst)"' <<<"$carried" 2>/dev/null || true)
+    carry_lines=$(jq -r '
+      (.carries[]? | "carry\t\(.name)\t\(.src)\t\(.dst)"),
+      (.drops[]?   | "drop\t\(.name)\t\(.src)\t\(.dst)")' <<<"$carried" 2>/dev/null || true)
     if [[ -n $carry_lines ]]; then
       names_doc=$(jq -c '.names' <<<"$carried")
-      while IFS=$'\t' read -r cname csrc cdst; do
+      while IFS=$'\t' read -r ckind cname csrc cdst; do
         [[ -n $cname ]] || continue
-        if ((dry)); then echo "would carry title \"$cname\" $csrc -> $cdst"
-        elif ((quiet)); then echo "plonk: carried title \"$cname\" $csrc -> $cdst" >&2
-        else echo "carried title \"$cname\" $csrc -> $cdst"; fi
+        if [[ $ckind == drop ]]; then
+          if ((dry)); then echo "would drop title \"$cname\" $csrc ($cdst already titled)"
+          elif ((quiet)); then echo "plonk: dropped title \"$cname\" $csrc ($cdst already titled)" >&2
+          else echo "dropped title \"$cname\" $csrc ($cdst already titled)"; fi
+        else
+          if ((dry)); then echo "would carry title \"$cname\" $csrc -> $cdst"
+          elif ((quiet)); then echo "plonk: carried title \"$cname\" $csrc -> $cdst" >&2
+          else echo "carried title \"$cname\" $csrc -> $cdst"; fi
+        fi
       done <<<"$carry_lines"
     fi
   fi

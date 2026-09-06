@@ -187,17 +187,57 @@ WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
 [[ $(jq -cS . "$names") == '{"1":"Home","3":"Brave"}' ]] || fail "a closed window must not move a title, got: $(cat "$names")"
 pass "closing the last window leaves the title where it was"
 
-# The destination's own title always wins; the orphan stays where it is.
+# The destination's own title always wins, and the absorbed one is dropped:
+# its windows now live under "Mine", so "Brave" describes nothing and must not
+# keep reserving the empty 3.
 write_stub '{"id":5}' '[{"name":"eDP-1"}]' \
   '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":5,"name":"5","monitor":"eDP-1","windows":1}]' \
   '[{"address":"0xb","workspace":{"id":1}},{"address":"0xa","workspace":{"id":5}}]'
 printf '%s\n' '{"0xa":3,"0xb":1}' >"$track"
 printf '%s\n' '{"1":"Home","3":"Brave","5":"Mine"}' >"$names"
+out=$(WORKSPACE_NAMES_FILE="$names" run_plonk)
+[[ $(jq -cS . "$names") == '{"1":"Home","2":"Mine"}' ]] || fail "an incoming title must not overwrite the destination's own, and must not linger, got: $(cat "$names")"
+grep -F 'dropped title "Brave" 3 (5 already titled)' <<<"$out" >/dev/null || fail "the drop must be reported, got: $out"
+pass "a title absorbed by an already-titled workspace is dropped, not stranded"
+
+# The dropped title frees its number: 3 no longer reserves a slot, so the
+# workspace that used to compact to 4 now lands on 3.
+write_stub '{"id":5}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":5,"name":"5","monitor":"eDP-1","windows":1},{"id":9,"name":"9","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xb","workspace":{"id":1}},{"address":"0xa","workspace":{"id":5}},{"address":"0xc","workspace":{"id":9}}]'
+printf '%s\n' '{"0xa":3,"0xb":1,"0xc":9}' >"$track"
+printf '%s\n' '{"1":"Home","3":"Brave","5":"Mine"}' >"$names"
+out=$(WORKSPACE_NAMES_FILE="$names" run_plonk)
+[[ $(jq -r 'has("3")' "$names") == false ]] || fail "the absorbed title must not survive, got: $(cat "$names")"
+grep -F 'dropped title "Brave" 3' <<<"$out" >/dev/null || fail "the drop must be reported, got: $out"
+pass "a dropped title stops reserving its number"
+
+# An automatic source title absorbed the same way is dropped too, and takes
+# its "_auto" mark with it.
+write_stub '{"id":5}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":5,"name":"5","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xb","workspace":{"id":1}},{"address":"0xa","workspace":{"id":5}}]'
+printf '%s\n' '{"0xa":3,"0xb":1}' >"$track"
+printf '%s\n' '{"1":"Home","3":"AutoLabel","5":"Mine","_auto":["3"]}' >"$names"
 WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
-[[ $(jq -cS . "$names") == '{"1":"Home","2":"Mine","3":"Brave"}' ]] || fail "an incoming title must not overwrite the destination's own, got: $(cat "$names")"
-pass "a carried title never overwrites the destination's own title"
+[[ $(jq -cS . "$names") == '{"1":"Home","2":"Mine"}' ]] || fail "an absorbed automatic label must be dropped with its mark, got: $(cat "$names")"
+pass "an absorbed automatic label is dropped with its _auto mark"
+
+# A CLOSED window still moves and drops nothing, even with the destination
+# titled — only titles whose windows actually went somewhere are absorbed.
+write_stub '{"id":5}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":5,"name":"5","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xb","workspace":{"id":1}},{"address":"0xd","workspace":{"id":5}}]'
+printf '%s\n' '{"0xa":3,"0xb":1,"0xd":5}' >"$track"
+printf '%s\n' '{"1":"Home","3":"Brave","5":"Mine"}' >"$names"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -r '.["3"] // .["2"] // ""' "$names") == "Brave" || $(jq -r '[.[]|strings]|index("Brave")' "$names") != null ]] || fail "a closed window must not drop a title, got: $(cat "$names")"
+pass "closing the last window drops no title even when the destination is titled"
 
 # --dry-run plans the carry and writes nothing.
+write_stub '{"id":5}' '[{"name":"eDP-1"}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":5,"name":"5","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xb","workspace":{"id":1}},{"address":"0xa","workspace":{"id":5}}]'
 printf '%s\n' '{"0xa":3,"0xb":1}' >"$track"
 printf '%s\n' '{"1":"Home","3":"Brave"}' >"$names"
 before=$(cat "$names")
