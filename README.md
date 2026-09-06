@@ -68,8 +68,8 @@ For example, workspaces 3 and 5 on `eDP-1` plus 7 and 8 on `HDMI-A-1` become 1, 
 
 - Special and scratchpad workspaces (`id < 1`) are ignored.
 - Named workspaces are ignored.
-- Titles from the [nixfred.workspace-names](https://github.com/nixfred/workspace-names) plugin (`~/.config/omarchy/workspace-names.json`, keyed by workspace id) **travel with their workspace** when it is renumbered. The file is snapshotted before every rewrite (last 20 in `~/.local/state/plonk/names-backups/`), an unnamed workspace arriving on a slot never deletes the slot's title, and plonk never removes a title on its own. Override the path with `WORKSPACE_NAMES_FILE`.
-- Empty numeric slots with custom titles are reserved: incoming workspaces skip them, so a saved name is never overwritten by another workspace’s title. Clear an unused custom name to release its slot. The Workspace Names helper shares Plonk’s directory lock when saving.
+- Titles from the [nixfred.workspace-names](https://github.com/nixfred/workspace-names) plugin (`~/.config/omarchy/workspace-names.json`, keyed by workspace id) **travel with their workspace** when it is renumbered. The file is snapshotted before every rewrite (last 20 in `~/.local/state/plonk/names-backups/`). By default, an unnamed workspace arriving on a slot never deletes the slot's title. With `empty_names=archive`, vanished slots release their numbers and retain their titles in the archive. Override the path with `WORKSPACE_NAMES_FILE`.
+- Empty numeric slots with custom titles are reserved by default. Set `empty_names=archive` to release slots after their workspace disappears: the old titles are preserved in `_plonk_archived_names` in the names file, and occupied workspaces carry their titles into the compacted slots. Live empty workspaces, including those displayed on another monitor, are preserved. The Workspace Names helper shares Plonk’s directory lock when saving.
 - If you were sitting on an empty workspace above the pack, you land on the first free slot.
 - Silent by default: it just does its work. Add `--notify` for a short desktop notification (`Plonked 3 workspaces` / `Already Plonked!`) via `omarchy-notification-send` or `notify-send` when present.
 - Window contents are preserved; tiling layout is preserved too when you opt into `change_id` (see above).
@@ -178,6 +178,7 @@ Optional. Environment variables win, then `~/.config/plonk/config` (`key=value` 
 # ~/.config/plonk/config
 renumber=move       # or change_id — see "How it works"   (env PLONK_RENUMBER)
 empty_active=keep   # or fill — see "Auto-plonk"          (env PLONK_EMPTY_ACTIVE)
+empty_names=keep    # or archive — preserve old names without reserving vanished slots (env PLONK_EMPTY_NAMES)
 ```
 
 `PLONK_FILL_DELAY_MS` (default 300) is the grace before `fill` jumps, so a window you open right after closing the last one still lands on the workspace you were on. The older one-line `~/.config/plonk/renumber` file is still honored. Unknown keys are reported once and ignored.

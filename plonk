@@ -75,6 +75,7 @@ else
 fi
 RENUMBER=move
 EMPTY_ACTIVE=keep
+EMPTY_NAMES=keep
 CONFIG_WARNED=
 config_warn() { # once per process: a daemon must not repeat this every round
   [[ -n $CONFIG_WARNED ]] && return 0
@@ -89,7 +90,7 @@ config_file_usable() {
   (( size <= 65536 ))
 }
 read_config() {
-  local renumber=${PLONK_RENUMBER:-} empty=${PLONK_EMPTY_ACTIVE:-} line key val n=0
+  local renumber=${PLONK_RENUMBER:-} empty=${PLONK_EMPTY_ACTIVE:-} names=${PLONK_EMPTY_NAMES:-} line key val n=0
   if [[ -n $CONFIG_DIR ]] && config_file_usable "$CONFIG_DIR/config"; then
     while IFS= read -r line || [[ -n $line ]]; do
       (( ++n > 64 )) && break
@@ -101,6 +102,7 @@ read_config() {
       case "$key" in
         renumber)     [[ -n $renumber ]] || renumber=$val ;;
         empty_active) [[ -n $empty ]] || empty=$val ;;
+        empty_names)  [[ -n $names ]] || names=$val ;;
         *) config_warn "unknown option '$key' in $CONFIG_DIR/config (ignored)" ;;
       esac
     done <"$CONFIG_DIR/config"
@@ -116,6 +118,10 @@ read_config() {
   case "${empty:-keep}" in
     keep|fill) EMPTY_ACTIVE=${empty:-keep} ;;
     *) config_warn "unknown empty_active mode '$empty' (want keep or fill); keeping"; EMPTY_ACTIVE=keep ;;
+  esac
+  case "${names:-keep}" in
+    keep|archive) EMPTY_NAMES=${names:-keep} ;;
+    *) config_warn "unknown empty_names mode '$names' (want keep or archive); keeping"; EMPTY_NAMES=keep ;;
   esac
 }
 
@@ -381,10 +387,46 @@ compact_unlocked() {
     skip_target=$active
   fi
 
+  # Opt-in gap closure: keep names from vanished workspaces in the same
+  # atomic document, but release their numeric slots. Never archive a live
+  # workspace (including an empty one displayed on another monitor).
+  local names_for_slots= archived_names tmp_names
+  if [[ $EMPTY_NAMES == archive ]] && names_file_usable; then
+    archived_names=$(jq --argjson ws "$workspaces" --argjson active "$active" '
+      if type != "object" then error("names must be an object") else . end
+      | if has("_plonk_archived_names") and (._plonk_archived_names | type) != "array"
+        then error("invalid names archive") else . end
+      | [to_entries[]
+         | select(.key | test("^[1-9][0-9]*$"))
+         | select(.value | type == "string" and test("\\S"))
+         | (.key | tonumber) as $id
+         | select($id != $active and ([$ws[] | select(.id == $id)] | length == 0))] as $gone
+      | if ($gone | length) == 0 then . else
+          ._plonk_archived_names = ((._plonk_archived_names // [])
+            + ($gone | map({workspace: .key, name: .value})) | unique_by([.workspace, .name]))
+          | delpaths($gone | map([.key]))
+        end' "$NAMES_FILE" 2>/dev/null) || {
+          echo "plonk: cannot archive workspace names; leaving them untouched" >&2
+          return 1
+        }
+    names_for_slots=$archived_names
+    if ((dry == 0)) && [[ $(jq -cS . <<<"$archived_names") != $(jq -cS . "$NAMES_FILE") ]]; then
+      backup_names
+      tmp_names=$(mktemp "${NAMES_FILE}.XXXXXX") || return 1
+      if printf '%s\n' "$archived_names" > "$tmp_names" && mv -- "$tmp_names" "$NAMES_FILE"; then
+        :
+      else
+        rm -f -- "$tmp_names"
+        return 1
+      fi
+    fi
+  fi
+
   # A custom title left on an empty slot belongs to that slot until the user
   # clears it. Reserve it rather than overwrite it with an incoming title.
   # Occupied workspaces still carry their titles as they compact in order.
   if names_file_usable; then
+    [[ -n $names_for_slots ]] || names_for_slots=$(cat -- "$NAMES_FILE")
     while IFS= read -r id; do
       [[ $id =~ ^[0-9]+$ ]] && blocked[$id]=1
     done < <(jq -r --argjson ws "$workspaces" '
@@ -393,7 +435,7 @@ compact_unlocked() {
       | select(.value | type == "string" and test("\\S"))
       | (.key | tonumber) as $id
       | select([$ws[] | select(.id == $id and .windows > 0)] | length == 0)
-      | $id else empty end' "$NAMES_FILE" 2>/dev/null)
+      | $id else empty end' <<<"$names_for_slots" 2>/dev/null)
   fi
 
   target=1

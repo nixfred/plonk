@@ -808,4 +808,35 @@ print("signal" if rc < 0 else "exit %d" % rc)
   pass "stopped watcher dies of SIGTERM, not exit 143"
 fi
 
+# Archive vanished named slots only when explicitly configured. Reproduce the
+# live failure: workspace 5 is gone but its title blocks 6 from closing the gap.
+archive_names="$tmpdir/archive-names.json"
+archive_fixture='{"_config":{"pill":true},"1":"Brave","2":"Tesla","3":"Voice","4":"Fixes","5":"Update vic","6":"Screen Saver"}'
+write_stub '{"id":6}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":6}}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":1},{"id":4,"name":"4","monitor":"eDP-1","windows":1},{"id":6,"name":"6","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":3}},{"address":"0xc","workspace":{"id":4}},{"address":"0xd","workspace":{"id":6}}]'
+printf '%s\n' "$archive_fixture" > "$archive_names"
+out=$(PLONK_EMPTY_NAMES=archive WORKSPACE_NAMES_FILE="$archive_names" run_plonk --dry-run)
+[[ $out == *'workspace 6 -> 4'* ]] || fail "archive dry-run should close all gaps: $out"
+[[ $(cat "$archive_names") == "$archive_fixture" && ! -s $log ]] || fail "archive dry-run must not write or dispatch"
+PLONK_EMPTY_NAMES=archive WORKSPACE_NAMES_FILE="$archive_names" run_plonk >/dev/null
+jq -e '."1" == "Brave" and ."2" == "Voice" and ."3" == "Fixes" and ."4" == "Screen Saver"
+  and (has("5") | not) and (has("6") | not) and ._config.pill
+  and (._plonk_archived_names | map(.name) | sort) == ["Tesla","Update vic"]' "$archive_names" >/dev/null || fail "occupied names travel and vanished names remain archived: $(cat "$archive_names")"
+pass "archive mode releases ghost slots, preserves names, and dry-run is read-only"
+
+write_stub '{"id":1}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":1}},{"name":"HDMI-1","activeWorkspace":{"id":2}}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":2,"name":"2","monitor":"HDMI-1","windows":0},{"id":4,"name":"4","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":4}}]'
+printf '%s\n' '{"2":"Other monitor","4":"Work"}' > "$archive_names"
+PLONK_EMPTY_NAMES=archive WORKSPACE_NAMES_FILE="$archive_names" run_plonk >/dev/null
+jq -e '."2" == "Other monitor" and ."3" == "Work" and (has("_plonk_archived_names") | not)' "$archive_names" >/dev/null || fail "archive mode must preserve a live empty workspace"
+printf '%s\n' '{"2":"Other monitor","4":"Work","_plonk_archived_names":"damaged"}' > "$archive_names"
+cp "$archive_names" "$tmpdir/archive-before.json"
+: > "$log"
+if PLONK_EMPTY_NAMES=archive WORKSPACE_NAMES_FILE="$archive_names" run_plonk >/dev/null 2>&1; then fail "damaged archive must reject compaction"; fi
+cmp "$archive_names" "$tmpdir/archive-before.json" || fail "damaged archive must stay untouched"
+[[ ! -s $log ]] || fail "damaged archive must not move windows"
+pass "archive mode protects live empty workspaces and damaged archives"
+
 echo "all tests passed"
