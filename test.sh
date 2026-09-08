@@ -737,6 +737,47 @@ else
   pass "flock not present; lock test skipped"
 fi
 
+# --- an empty workspace a monitor is showing gets packed too ----------------
+# Fred 2026-09-08: a second head sitting on an empty workspace 7 left the bar
+# reading "1 2 3 7". It holds a number and every bar draws it, so it packs.
+write_stub '{"id":1}' \
+  '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":1}},{"name":"HEADLESS-8","activeWorkspace":{"id":7}}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":2,"name":"2","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":1},{"id":7,"name":"7","monitor":"HEADLESS-8","windows":0,"ispersistent":false}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":2}},{"address":"0xc","workspace":{"id":3}}]'
+out=$(run_plonk)
+grep -F 'plonked workspace 7 -> 4' <<<"$out" >/dev/null || fail "a visible empty workspace must pack down, got: $out"
+grep -F 'id = 4 })' "$log" >/dev/null || fail "it must be renumbered with change_id, got: $(cat "$log")"
+grep -F 'window.move' "$log" >/dev/null && fail "an empty workspace has no windows to move"
+pass "an empty workspace another monitor is showing packs down too"
+
+# The move strategy cannot renumber it (no windows to carry), so it stays put
+# and does not eat the number it would have taken.
+: >"$log"
+out=$(PLONK_RENUMBER=move run_plonk)
+grep -F 'workspace 7' <<<"$out" >/dev/null && fail "move cannot renumber an empty workspace, got: $out"
+grep -F 'Already Plonked' <<<"$out" >/dev/null || fail "nothing else should move, got: $out"
+pass "the move strategy leaves an empty workspace where it is"
+
+# A persistent workspace is configured to own its number.
+write_stub '{"id":1}' \
+  '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":1}},{"name":"HEADLESS-8","activeWorkspace":{"id":7}}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":7,"name":"7","monitor":"HEADLESS-8","windows":0,"ispersistent":true}]' \
+  '[{"address":"0xa","workspace":{"id":1}}]'
+out=$(run_plonk)
+grep -F 'Already Plonked' <<<"$out" >/dev/null || fail "a persistent workspace keeps its number, got: $out"
+pass "a persistent empty workspace keeps its number"
+
+# A reserved slot below a workspace must never push it UP the number line.
+write_stub '{"id":2}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":2}}]' \
+  '[{"id":2,"name":"2","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":2}},{"address":"0xb","workspace":{"id":3}}]'
+printf '%s\n' '{}' >"$track"
+printf '%s\n' '{"1":"Reserved","2":"Two","3":"Three"}' >"$names"
+out=$(WORKSPACE_NAMES_FILE="$names" run_plonk)
+grep -F 'Already Plonked' <<<"$out" >/dev/null || fail "a reserved slot must not push workspaces up, got: $out"
+[[ $(jq -cS . "$names") == '{"1":"Reserved","2":"Two","3":"Three"}' ]] || fail "titles must not move either, got: $(cat "$names")"
+pass "a reserved slot never pushes a workspace up the number line"
+
 # --- multi-monitor: the other head's empty active workspace is not a hole --
 # HDMI-1 (unfocused) is showing empty workspace 2; eDP-1 (focused, active 1)
 # has 1 and 4 occupied. 4 must go to 3, never be merged into HDMI's 2.

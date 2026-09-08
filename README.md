@@ -48,6 +48,8 @@ It is safe to bind and safe to mash: once the number line is compact, another ru
 
 Hyprland workspace IDs are global. Plonk reads the compositor's workspace and client state, sorts occupied numeric workspaces, and assigns the lowest available IDs in order.
 
+An **empty** workspace that a monitor is currently showing packs too: it holds a number and every bar draws it, so leaving it behind is the same gap. A second head parked on an empty workspace 7 is why a bar can read `1 2 3 7`. Only `change_id` can renumber one — there are no windows to carry — so under the default move strategy it stays where it is, without consuming the number. A workspace marked `persistent` is configured to own its number and is always left alone.
+
 By default a workspace is renumbered by moving its windows to the new number and pinning that workspace to the original monitor. Every bar follows the create/destroy events this produces, so the number line updates everywhere.
 
 Hyprland also has `hl.dsp.workspace.change_id`, which renumbers in place and keeps the tiling layout. It is **opt-in** because it emits `changeworkspaceid`, an event Quickshell 0.3.1 ignores: the stock Omarchy bar keeps showing the old number as a ghost and the renumbered workspace as empty until something else refreshes it. If your bar handles that event (for example [nixfred.workspace-names](https://github.com/nixfred/workspace-names)), turn it on with `renumber=change_id` in `~/.config/plonk/config` or the environment variable `PLONK_RENUMBER=change_id` (see [Configuration](#configuration)). When the target ID is held by an empty persistent workspace, or `change_id` fails, Plonk moves the windows instead.
@@ -113,7 +115,7 @@ Clone the repository, pin the release you reviewed, and install the script from 
 git clone https://github.com/nixfred/plonk.git
 cd plonk
 git tag --list          # pick a release
-git checkout v1.2.1     # pin it, then read plonk before installing
+git checkout v1.2.2     # pin it, then read plonk before installing
 install -Dm755 plonk ~/.local/bin/plonk
 ```
 

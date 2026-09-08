@@ -433,8 +433,8 @@ compact_unlocked() {
             end)' <<<"$1" 2>/dev/null
   }
 
-  renumber() { # src dst mon
-    local src=$1 dst=$2 mon=$3 out
+  renumber() { # src dst mon [windows]
+    local src=$1 dst=$2 mon=$3 wins=${4:-1} out
     if [[ $RENUMBER == change_id && -z ${taken[$dst]+x} ]]; then
       # hyprctl exits 0 even on failure ("warning: ... ID is taken" /
       # "no such workspace" go to stdout); only the literal "ok" is success.
@@ -446,6 +446,9 @@ compact_unlocked() {
         return 0
       fi
     fi
+    # Nothing to move: the window-move strategy would dispatch a workspace move
+    # for a workspace with no windows and create an empty one somewhere else.
+    ((wins > 0)) || return 1
     move_windows "$src" "$dst"
     OWN_WSMOVES[$dst]=1
     hypr_dispatch "hl.dsp.workspace.move({ workspace = \"$dst\", monitor = \"$mon\" })" \
@@ -620,17 +623,25 @@ compact_unlocked() {
 
   target=1
   active_seen=0
-  while IFS=$'\t' read -r ws mon; do
+  while IFS=$'\t' read -r ws mon wins; do
     [[ $ws =~ ^[0-9]+$ ]] || continue
+    # An empty workspace has no windows to carry anywhere, so only change_id can
+    # renumber it. Under the move strategy leave it exactly where it is, without
+    # consuming the number it would have taken.
+    if ((wins == 0)) && [[ $RENUMBER != change_id ]]; then continue; fi
     ((ws == active)) && active_seen=1
     while ((skip_target != 0 && target == skip_target)) || [[ -n ${blocked[$target]+x} ]]; do
       target=$((target + 1))
     done
-    if ((ws != target)); then
+    if ((target > ws)); then
+      # Never push a workspace UP the number line — that is not compaction.
+      # A reserved slot below it can walk the target past where it already is.
+      target=$ws
+    elif ((ws != target)); then
       if ((dry)); then
         echo "would plonk workspace $ws -> $target ($mon)"
       else
-        renumber "$ws" "$target" "$mon"
+        renumber "$ws" "$target" "$mon" "$wins"
         if ((quiet)); then echo "plonk: plonked workspace $ws -> $target ($mon)" >&2
         else echo "plonked workspace $ws -> $target ($mon)"; fi
       fi
@@ -638,7 +649,16 @@ compact_unlocked() {
       moves=$((moves + 1))
     fi
     target=$((target + 1))
-  done < <(jq -r '.[] | select(.id > 0 and .windows > 0 and ((.name // "") | test("^[0-9]+$"))) | "\(.id)\t\(.monitor)"' <<<"$workspaces" | sort -n)
+  done < <(jq -r --argjson mon "$monitors" '
+      [$mon[]? | .activeWorkspace.id? // empty | select(. > 0)] as $shown
+      | .[] | select(.id > 0 and ((.name // "") | test("^[0-9]+$")))
+      # Occupied workspaces pack, and so does an EMPTY one a monitor is
+      # currently showing: it holds a number, it is drawn in every bar, and
+      # leaving it behind is exactly the gap plonk exists to close. A
+      # persistent workspace is configured to own its number — leave it.
+      | .id as $id
+      | select(.windows > 0 or (.ispersistent != true and ($shown | index($id)) != null))
+      | "\(.id)\t\(.monitor)\t\(.windows)"' <<<"$workspaces" | sort -n)
 
   # Sitting on an empty workspace above the pack? Land on the first free slot.
   if ((keep_empty_active == 0 && active_seen == 0 && active > target)); then
