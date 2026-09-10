@@ -140,16 +140,73 @@ ls "$tmpdir"/workspace-names.json.* >/dev/null 2>&1 && fail "no temp files left 
 grep -F 'rename' "$log" >/dev/null && fail "never touches Hyprland workspace names"
 pass "workspace-names.json titles travel with renumbered workspaces"
 
-# A named incoming workspace must not overwrite a custom title on an empty slot.
+# A title on a workspace that NO LONGER EXISTS releases its number (1.2.4).
+# Reserving it forever is what made the bar read "2 4" while plonk reported
+# "Already Plonked!". The displaced title is archived, never overwritten.
 printf '%s\n' '{"1":"Reserved project","3":"Brave","4":"Voice","7":"Blank"}' >"$names"
 : >"$log"
 WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
-[[ $(jq -cS . "$names") == '{"1":"Reserved project","2":"Brave","3":"Voice","4":"Blank"}' ]] || fail "custom slot must survive named arrivals: $(cat "$names")"
-grep -F 'id = 1 })' "$log" >/dev/null && fail "must not compact onto a reserved custom slot"
-pass "custom names on empty slots are protected from incoming workspace names"
+[[ $(jq -cS 'with_entries(select(.key|test("^[0-9]+$")))' "$names") == '{"1":"Brave","2":"Voice","3":"Blank"}' ]] ||
+  fail "a title whose workspace is gone must not hold its number: $(cat "$names")"
+[[ $(jq -c '[._plonk_archived_names[].name]' "$names") == '["Reserved project"]' ]] ||
+  fail "the displaced title must be archived, not lost: $(cat "$names")"
+grep -F 'id = 1 })' "$log" >/dev/null || fail "slot 1 must be reused once its title stops reserving it"
+pass "a title on a vanished workspace releases its number and is archived"
+
+# A title on a LIVE but empty workspace still holds its number. This is the
+# half of the old behaviour worth keeping: you named a workspace you are using,
+# nobody steals its number while it exists.
+track="$tmpdir/state-sandbox/window-owners.json"
+mkdir -p "$tmpdir/state-sandbox"
+write_stub '{"id":3}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":3}}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":0},{"id":3,"name":"3","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":3}}]'
+printf '%s\n' '{}' >"$track"
+printf '%s\n' '{"1":"Deploys","3":"Work"}' >"$names"
+out=$(WORKSPACE_NAMES_FILE="$names" run_plonk)
+grep -F 'plonked workspace 3 -> 2' <<<"$out" >/dev/null ||
+  fail "a live empty workspace must keep its titled number, got: $out"
+[[ $(jq -r '."1"' "$names") == Deploys ]] || fail "the live slot's title must stay: $(cat "$names")"
+pass "a title on a live empty workspace still reserves its number"
+
+# A title parked on a workspace that does not exist YET, above the pack, is
+# left completely alone — pre-labelling slots you have not opened is a real
+# workflow and plonk must not sweep it into the archive on sight.
+write_stub '{"id":1}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":1}}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":2,"name":"2","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":2}}]'
+printf '%s\n' '{}' >"$track"
+printf '%s\n' '{"1":"Mail","2":"Code","9":"Music"}' >"$names"
+WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
+[[ $(jq -cS . "$names") == '{"1":"Mail","2":"Code","9":"Music"}' ]] ||
+  fail "a pre-labelled slot above the pack must be untouched: $(cat "$names")"
+pass "a title for a workspace that does not exist yet is left alone"
+
+# Fred 2026-09-10, the reported bug end to end: the bar read "2 4" because
+# titles typed on workspaces 1 and 3 — both long closed — reserved those
+# numbers, and plonk reported "Already Plonked!" over a visible gap.
+write_stub '{"id":4}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":4}}]' \
+  '[{"id":2,"name":"2","monitor":"eDP-1","windows":1},{"id":4,"name":"4","monitor":"eDP-1","windows":2},{"id":5,"name":"5","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":2}},{"address":"0xb","workspace":{"id":4}},{"address":"0xc","workspace":{"id":4}},{"address":"0xd","workspace":{"id":5}}]'
+printf '%s\n' '{}' >"$track"
+printf '%s\n' '{"1":"Herdr","2":"Brave","3":"Launcher fix","4":"Terminal","5":"vic: plonk","_auto":["4","5"]}' >"$names"
+out=$(WORKSPACE_NAMES_FILE="$names" run_plonk)
+for m in 'workspace 2 -> 1' 'workspace 4 -> 2' 'workspace 5 -> 3'; do
+  grep -F "$m" <<<"$out" >/dev/null || fail "the reported gap must close ($m), got: $out"
+done
+[[ $(jq -cS 'with_entries(select(.key|test("^[0-9]+$")))' "$names") == '{"1":"Brave","2":"Terminal","3":"vic: plonk"}' ]] ||
+  fail "titles must ride the compaction: $(cat "$names")"
+[[ $(jq -c '[._plonk_archived_names[].name]|sort' "$names") == '["Herdr","Launcher fix"]' ]] ||
+  fail "the two displaced titles must be archived, not lost: $(cat "$names")"
+pass "the reported \"2 4\" gap closes and both displaced titles are archived"
 
 # an UNNAMED workspace arriving on a slot never deletes the slot's title
 # (titles are sticky; plonk must never remove a name on its own)
+write_stub '{"id":7}' \
+  '[{"name":"eDP-1"}]' \
+  '[{"id":7,"name":"7","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":2},{"id":4,"name":"4","monitor":"eDP-1","windows":1},{"id":-99,"name":"special:scratchpad","monitor":"eDP-1","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":3}},{"address":"0xb","workspace":{"id":3}},{"address":"0xc","workspace":{"id":4}},{"address":"0xd","workspace":{"id":7}},{"address":"0xe","workspace":{"id":-99}}]'
+printf '%s\n' '{}' >"$track"
 printf '%s\n' '{"1":"Keep","2":"Me"}' >"$names"
 WORKSPACE_NAMES_FILE="$names" run_plonk >/dev/null
 [[ $(jq -c . "$names") == '{"1":"Keep","2":"Me"}' ]] || fail "unnamed arrivals must not touch existing titles, got: $(cat "$names")"
@@ -780,8 +837,10 @@ grep -F 'Already Plonked' <<<"$out" >/dev/null || fail "a persistent workspace k
 pass "a persistent empty workspace keeps its number"
 
 # A reserved slot below a workspace must never push it UP the number line.
+# Workspace 1 is LIVE but empty here — that is what still reserves a slot as of
+# 1.2.4; a title on a workspace that no longer exists does not.
 write_stub '{"id":2}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":2}}]' \
-  '[{"id":2,"name":"2","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":1}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":0},{"id":2,"name":"2","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":1}]' \
   '[{"address":"0xa","workspace":{"id":2}},{"address":"0xb","workspace":{"id":3}}]'
 printf '%s\n' '{}' >"$track"
 printf '%s\n' '{"1":"Reserved","2":"Two","3":"Three"}' >"$names"

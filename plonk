@@ -16,6 +16,9 @@
 # dropped rather than archived. Move the last window onto a workspace that is
 # already titled and those windows inherit the destination's name: the source
 # title is dropped rather than left holding an empty number out of the pack.
+# A title reserves its number only while its workspace still EXISTS; one left
+# behind by a workspace that is gone releases the number, and a title displaced
+# from a slot is archived rather than overwritten.
 # Override the file with WORKSPACE_NAMES_FILE.
 # If you were sitting on an empty workspace you land on the first free slot
 # after the compacted ones. Silent by default: --notify adds a desktop
@@ -335,8 +338,23 @@ compact_unlocked() {
     # came from a window title rather than from the user. It has to move with
     # the name, or a renumbered automatic name would start outranking the ones
     # you typed.
+    # A title already sitting on the destination is DISPLACED, not deleted: it
+    # goes to the archive first. Before 1.2.4 this silently overwrote it, which
+    # only became reachable once a title on a workspace that no longer exists
+    # stopped reserving its number — the name that had been holding the slot
+    # would have been the price of freeing it. An automatic label is
+    # regenerated from window titles, so it is dropped rather than archived.
     if jq --arg s "$src" --arg d "$dst" '
          (if (._auto | type) == "array" then ._auto else [] end) as $auto
+         | (if has("_plonk_archived_names") and (._plonk_archived_names | type) == "array"
+            then ._plonk_archived_names else [] end) as $arch
+         | (.[$d] // "") as $held
+         | (($held | type) == "string" and ($held | test("\\S"))
+            and (($auto | index($d)) == null)) as $displaced
+         | (if $displaced
+            then ._plonk_archived_names =
+                   (($arch + [{workspace: $d, name: $held}]) | unique_by([.workspace, .name]))
+            else . end)
          | .[$d] = .[$s] | del(.[$s])
          | ._auto = (if ($auto | index($s)) then (($auto - [$s, $d]) + [$d])
                      else ($auto - [$s, $d]) end)
@@ -610,12 +628,22 @@ compact_unlocked() {
   fi
   names_for_slots=$names_doc
 
-  # A custom title left on an empty slot belongs to that slot until the user
-  # clears it. Reserve it rather than overwrite it with an incoming title.
+  # A custom title on a LIVE but empty workspace belongs to that slot until the
+  # user clears it. Reserve it rather than overwrite it with an incoming title.
   # Occupied workspaces still carry their titles as they compact in order.
-  # An AUTOMATIC label reserves nothing: it was written from a window title, and
-  # letting one hold a number would leave a permanent gap in the pack for every
-  # workspace that ever had a window in it.
+  #
+  # A title whose workspace no longer EXISTS reserves nothing (2026-09-10). It
+  # used to, and a gap-closing tool that refuses to close gaps is a bad joke:
+  # Fred's bar read "2 4" with plonk reporting "Already Plonked!", because two
+  # titles typed on workspaces that had since been closed were holding numbers
+  # 1 and 3 hostage forever. Those titles are archived just above, so the number
+  # is released without the name being lost. If you want a number held for good,
+  # Hyprland has a real mechanism for it — mark the workspace `persistent` and
+  # plonk never renumbers it.
+  #
+  # An AUTOMATIC label reserves nothing either: it was written from a window
+  # title, and letting one hold a number would leave a permanent gap in the pack
+  # for every workspace that ever had a window in it.
   if [[ -n $names_for_slots ]]; then
     while IFS= read -r id; do
       [[ $id =~ ^[0-9]+$ ]] && blocked[$id]=1
@@ -628,6 +656,7 @@ compact_unlocked() {
       | .key as $key
       | select(($auto | index($key)) == null)
       | ($key | tonumber) as $id
+      | select([$ws[] | select(.id == $id)] | length > 0)
       | select([$ws[] | select(.id == $id and .windows > 0)] | length == 0)
       | $id else empty end' <<<"$names_for_slots" 2>/dev/null)
   fi
