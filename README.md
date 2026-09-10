@@ -101,6 +101,8 @@ Remove it cleanly with:
 omarchy plugin remove io.github.nixfred.plonk
 ```
 
+The watcher also **picks up its own updates**: when the `plonk` script is replaced on disk (install, `mv`, `git checkout`), it re-execs itself at the next event, keeping the same PID so systemd sees no stop/start. Without that, a daemon started days earlier keeps running the version bash parsed at launch, and a fix that shipped in between is inert until someone restarts the unit by hand.
+
 Removal disables the service before deleting its checkout, and the watcher takes its `socat` event reader down with it. Plonk leaves only runtime state in `~/.local/state/plonk/`: a notification timestamp (only if you used `--notify`), the window-owner map (`window-owners.json`, window address → workspace id, so titles can follow their windows) and—when the workspace-names integration is used—up to 20 safety backups. The run lock is taken on that directory itself, so no lock file is written. Those files are inert and may be deleted manually if you do not want the recovery history. The names file is only touched when it is a plain regular file under 1 MiB; a symlink, FIFO, or oversized file is reported and left alone.
 
 ## Install the standalone command
@@ -115,7 +117,7 @@ Clone the repository, pin the release you reviewed, and install the script from 
 git clone https://github.com/nixfred/plonk.git
 cd plonk
 git tag --list          # pick a release
-git checkout v1.2.2     # pin it, then read plonk before installing
+git checkout v1.2.3     # pin it, then read plonk before installing
 install -Dm755 plonk ~/.local/bin/plonk
 ```
 

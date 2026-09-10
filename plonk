@@ -141,6 +141,17 @@ read_config() {
 
 usage() { echo "Usage: plonk [-n|--dry-run] [--notify] | plonk --watch [--notify]" >&2; }
 
+# --watch runs for days. bash parses a script as it goes and keeps what it has
+# already read in memory, so a daemon whose script is REPLACED underneath it
+# (plugin update, git pull, install) keeps running the version it started with,
+# silently, forever. On vic that meant three days of 1.1.2 behaviour with 1.2.2
+# on disk — every fix shipped in between was inert until someone restarted the
+# unit by hand. Remember what we are, so the watcher can notice and re-exec.
+SELF_PATH=$(readlink -f -- "$0" 2>/dev/null) || SELF_PATH=$0
+SELF_ARGS=("$@")
+self_stamp() { stat -c '%Y:%s' -- "$SELF_PATH" 2>/dev/null || echo missing; }
+SELF_STAMP=$(self_stamp)
+
 dry=0
 watch=0
 quiet=0
@@ -797,6 +808,7 @@ watch_connection() {
   SOCAT_PID=$!
 
   run_pending_compacts() {
+    restart_if_updated
     if ((need && paused)); then overlay_open || paused=0; fi
     rounds=0
     while ((need && paused == 0 && rounds < 5)); do
@@ -851,6 +863,29 @@ kill_socat() {
   [[ -n ${SOCAT_PID:-} ]] || return 0
   kill "$SOCAT_PID" 2>/dev/null || true
   SOCAT_PID=
+}
+
+# Pick up a new version of ourselves without waiting for a manual restart.
+# exec keeps the same PID, so systemd sees no stop/start and the unit stays
+# active. This covers the way updates actually land — install, mv, git checkout
+# — which replace the inode and leave the running bash reading the old one. A
+# tool that instead truncates and rewrites the file IN PLACE can still kill the
+# daemon outright, because bash reads its own script by offset; nothing running
+# inside that process can defend against it. Never exec a file that is still
+# being written, so the replacement has to parse first; one that does not is
+# remembered as seen and reported once rather than every round.
+restart_if_updated() {
+  local now
+  now=$(self_stamp)
+  [[ $now == missing || $now == "$SELF_STAMP" ]] && return 0
+  SELF_STAMP=$now
+  if ! bash -n -- "$SELF_PATH" 2>/dev/null; then
+    echo "plonk: $SELF_PATH changed but does not parse; staying on the running version" >&2
+    return 0
+  fi
+  echo "plonk: script updated on disk — restarting the watcher" >&2
+  kill_socat
+  exec "$SELF_PATH" "${SELF_ARGS[@]}"
 }
 
 watch() {

@@ -609,6 +609,18 @@ grep -F 'window.move' "$log" >/dev/null && fail "fill must jump, not dump window
 grep -F 'change_id' "$log" >/dev/null && fail "fill must not renumber onto the workspace the user is on, log=$(cat "$log")"
 pass "empty_active=fill jumps to the next occupied workspace immediately"
 
+# Fred 2026-09-10, vic: "Plonk not closing up workspace 1?" — the bar read
+# [1 empty, you are on it] [2] [3] [4] and 2/3/4 never shifted down. Workspace 1
+# is the bottom of the number line, so this is the fill path at its edge.
+WS1_EMPTY='[{"id":1,"name":"1","monitor":"eDP-1","windows":0},{"id":2,"name":"2","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":1},{"id":4,"name":"4","monitor":"eDP-1","windows":1}]'
+WS1_CLIENTS='[{"address":"0xb","workspace":{"id":2}},{"address":"0xc","workspace":{"id":3}},{"address":"0xd","workspace":{"id":4}}]'
+write_stub '{"id":1}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":1}}]' "$WS1_EMPTY" "$WS1_CLIENTS"
+start_event_socket "$SOCK" $'closewindow>>a\n'
+PLONK_EMPTY_ACTIVE=fill PLONK_FILL_DELAY_MS=0 run_watch_once >/dev/null
+grep -Fx 'dispatch hl.dsp.focus({ workspace = "2" })' "$log" >/dev/null ||
+  fail "emptying workspace 1 under you must jump to 2, log=$(cat "$log")"
+pass "empty_active=fill works at the bottom of the number line (workspace 1)"
+
 # ...but stands down if the user already left during the grace (the third
 # activeworkspace read is the post-grace re-check).
 fill_calls="$tmpdir/fill-active.calls"; printf '0\n' >"$fill_calls"
@@ -955,6 +967,47 @@ wait "$locker" 2>/dev/null || true
 grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
   fail "watch dropped its round while the lock was busy, log=$(cat "$log")"
 pass "watch retries a compact skipped by the lock"
+
+# --- watch: a script replaced underneath the daemon takes effect -------------
+# Fred 2026-09-10: vic's watcher had been up since Sep 5 while the script was
+# rewritten on Sep 8, so the box ran 1.1.2 logic with 1.2.2 on disk and every
+# fix in between was inert. bash keeps what it already parsed, so the daemon
+# has to notice and re-exec itself.
+live="$tmpdir/plonk-live"
+marker="$tmpdir/reexec.marker"
+cp "$PLONK" "$live"; chmod +x "$live"
+rm -f "$marker"
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$COMPACT_WS" "$HOLE_CLIENTS"
+rm -f "$SOCK"
+cat >"$tmpdir/reexec-feed.sh" <<'GEN'
+exec 2>/dev/null
+sleep 0.6
+printf '%s\n' 'openwindow>>a'
+sleep 1.2
+GEN
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sh '$tmpdir/reexec-feed.sh'" &
+feeder=$!
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_SETTLE_US=50000 \
+  PATH="$stub:$PATH" timeout 3 "$live" --watch >/dev/null 2>&1 &
+daemon=$!
+sleep 0.3
+# Replace atomically, the way an install or a git checkout does. Writing over
+# the file in place would truncate it under the running bash, which reads its
+# own script by offset and simply dies — the hazard this guard exists for, and
+# one no in-process check can survive.
+cat >"$live.new" <<GEN
+#!/usr/bin/env bash
+printf 'replaced\n' > "$marker"
+sleep 2
+GEN
+chmod +x "$live.new"
+mv "$live.new" "$live"
+wait "$daemon" 2>/dev/null || true
+kill "$feeder" 2>/dev/null || true
+wait "$feeder" 2>/dev/null || true
+[[ -f $marker ]] || fail "a script replaced under the watcher must be re-exec'd"
+pass "the watcher re-execs when its own script is updated"
 
 # --- watch: stopping the daemon takes its socat reader down with it ----------
 # The plugin service (and systemctl stop) SIGTERM the daemon. bash dies, but
