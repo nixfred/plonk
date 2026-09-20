@@ -48,7 +48,7 @@ It is safe to bind and safe to mash: once the number line is compact, another ru
 
 Hyprland workspace IDs are global. Plonk reads the compositor's workspace and client state, sorts occupied numeric workspaces, and assigns the lowest available IDs in order.
 
-An **empty** workspace that a monitor is currently showing packs too: it holds a number and every bar draws it, so leaving it behind is the same gap. A second head parked on an empty workspace 7 is why a bar can read `1 2 3 7`. Only `change_id` can renumber one — there are no windows to carry — so under the default move strategy it stays where it is, without consuming the number. A workspace marked `persistent` is configured to own its number and is always left alone.
+An **empty** workspace that a monitor is currently showing packs too: it holds a number and every bar draws it, so leaving it behind is the same gap. A second head parked on an empty workspace 7 is why a bar can read `1 2 3 7`. The one exception is the empty workspace **you are standing on**: open a scratch workspace at 9 and it stays at 9, with your focus on it, because you chose that number. It takes no slot from the pack, nothing is renumbered onto it, and Hyprland drops it the moment you leave. Only `change_id` can renumber one — there are no windows to carry — so under the default move strategy it stays where it is, without consuming the number. A workspace marked `persistent` is configured to own its number and is always left alone.
 
 By default a workspace is renumbered by moving its windows to the new number and pinning that workspace to the original monitor. Every bar follows the create/destroy events this produces, so the number line updates everywhere.
 
@@ -117,7 +117,7 @@ Clone the repository, pin the release you reviewed, and install the script from 
 git clone https://github.com/nixfred/plonk.git
 cd plonk
 git tag --list          # pick a release
-git checkout v1.2.4     # pin it, then read plonk before installing
+git checkout v1.2.5     # pin it, then read plonk before installing
 install -Dm755 plonk ~/.local/bin/plonk
 ```
 

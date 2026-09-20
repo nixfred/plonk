@@ -20,6 +20,8 @@
 # behind by a workspace that is gone releases the number, and a title displaced
 # from a slot is archived rather than overwritten.
 # Override the file with WORKSPACE_NAMES_FILE.
+# The empty workspace you are STANDING ON is left at the number you opened it
+# at, takes no slot from the pack, and nothing is renumbered onto it.
 # If you were sitting on an empty workspace you land on the first free slot
 # after the compacted ones. Silent by default: --notify adds a desktop
 # notification (omarchy-notification-send / notify-send) in any mode.
@@ -669,6 +671,18 @@ compact_unlocked() {
     # renumber it. Under the move strategy leave it exactly where it is, without
     # consuming the number it would have taken.
     if ((wins == 0)) && [[ $RENUMBER != change_id ]]; then continue; fi
+    # The empty workspace you are STANDING ON is yours: you opened it at that
+    # number to put something in it, so leave it there. It keeps its slot
+    # (blocked, so nothing else lands on it and merges into it) and takes no
+    # number from the pack. Hyprland drops it the moment you leave, and the
+    # pack is contiguous again without plonk touching it. An empty workspace
+    # another head is showing still packs — that is 1.2.2, a different
+    # workspace and a different question.
+    if ((wins == 0 && ws == active)); then
+      active_seen=1
+      blocked[$ws]=1
+      continue
+    fi
     ((ws == active)) && active_seen=1
     while ((skip_target != 0 && target == skip_target)) || [[ -n ${blocked[$target]+x} ]]; do
       target=$((target + 1))

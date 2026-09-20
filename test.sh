@@ -849,6 +849,34 @@ grep -F 'Already Plonked' <<<"$out" >/dev/null || fail "a reserved slot must not
 [[ $(jq -cS . "$names") == '{"1":"Reserved","2":"Two","3":"Three"}' ]] || fail "titles must not move either, got: $(cat "$names")"
 pass "a reserved slot never pushes a workspace up the number line"
 
+# --- the empty workspace you opened stays where you put it -----------------
+# Fred 2026-09-20: "allow one empty workspace to remain open if I open it."
+# 1.2.2 packed every visible empty workspace, which meant SUPER+9 for a scratch
+# space became workspace 4 with your focus dragged along behind it.
+write_stub '{"id":9}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":9}}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":3},{"id":2,"name":"2","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":4},{"id":9,"name":"9","monitor":"eDP-1","windows":0,"ispersistent":false}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":2}},{"address":"0xc","workspace":{"id":3}}]'
+out=$(run_plonk)
+grep -F 'Already Plonked' <<<"$out" >/dev/null || fail "the workspace you opened must keep its number, got: $out"
+[[ ! -s $log ]] || fail "nothing may be dispatched at all, got: $(cat "$log")"
+pass "the empty workspace you opened keeps the number you chose"
+
+# ...and your focus is never relocated off it either.
+grep -F 'hl.dsp.focus' "$log" >/dev/null && fail "focus must not be moved off the workspace you opened"
+pass "focus stays on the empty workspace you opened"
+
+# Standing on an empty workspace BELOW an occupied one: the occupied one must
+# not be renumbered onto it. change_id would fail on the taken id and the
+# window-move fallback would merge those windows into the workspace you are
+# looking at.
+write_stub '{"id":2}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":2}}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":3},{"id":2,"name":"2","monitor":"eDP-1","windows":0,"ispersistent":false},{"id":3,"name":"3","monitor":"eDP-1","windows":4}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xc","workspace":{"id":3}}]'
+out=$(run_plonk)
+grep -F 'window.move' "$log" >/dev/null && fail "windows must never be merged into the workspace you are standing on"
+grep -F 'id = 2 })' "$log" >/dev/null && fail "nothing may be renumbered onto the workspace you are standing on"
+pass "nothing lands on the empty workspace you are standing on"
+
 # --- multi-monitor: the other head's empty active workspace is not a hole --
 # HDMI-1 (unfocused) is showing empty workspace 2; eDP-1 (focused, active 1)
 # has 1 and 4 occupied. 4 must go to 3, never be merged into HDMI's 2.
