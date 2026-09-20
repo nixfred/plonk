@@ -21,7 +21,9 @@
 # from a slot is archived rather than overwritten.
 # Override the file with WORKSPACE_NAMES_FILE.
 # The empty workspace you are STANDING ON is left at the number you opened it
-# at, takes no slot from the pack, and nothing is renumbered onto it.
+# at, takes no slot from the pack, and nothing is renumbered onto it. With
+# keep_open=one it is also pinned persistent so Hyprland does not drop it when
+# you look away; released once you use it or open a different empty one.
 # If you were sitting on an empty workspace you land on the first free slot
 # after the compacted ones. Silent by default: --notify adds a desktop
 # notification (omarchy-notification-send / notify-send) in any mode.
@@ -68,6 +70,13 @@ fi
 TRACK_FILE=
 [[ -n $STATE_DIR ]] && TRACK_FILE=$STATE_DIR/window-owners.json
 
+# keep_open=one: the id of the empty workspace plonk is currently holding open
+# on your behalf, so a later round knows which pin is ours to release. Only a
+# workspace plonk pinned itself is ever un-pinned; one you made persistent in
+# your own Hyprland config is never touched.
+HELD_FILE=
+[[ -n $STATE_DIR ]] && HELD_FILE=$STATE_DIR/held-workspace
+
 # Options. Environment wins, then ~/.config/plonk/config (key=value lines,
 # "#" comments), then the legacy one-line ~/.config/plonk/renumber file.
 # Re-read on every compact, so the daemon follows the file without a restart.
@@ -95,6 +104,7 @@ fi
 RENUMBER=move
 EMPTY_ACTIVE=keep
 EMPTY_NAMES=keep
+KEEP_OPEN=off
 CONFIG_WARNED=
 config_warn() { # once per process: a daemon must not repeat this every round
   [[ -n $CONFIG_WARNED ]] && return 0
@@ -109,7 +119,7 @@ config_file_usable() {
   (( size <= 65536 ))
 }
 read_config() {
-  local renumber=${PLONK_RENUMBER:-} empty=${PLONK_EMPTY_ACTIVE:-} names=${PLONK_EMPTY_NAMES:-} line key val n=0
+  local renumber=${PLONK_RENUMBER:-} empty=${PLONK_EMPTY_ACTIVE:-} names=${PLONK_EMPTY_NAMES:-} keep=${PLONK_KEEP_OPEN:-} line key val n=0
   if [[ -n $CONFIG_DIR ]] && config_file_usable "$CONFIG_DIR/config"; then
     while IFS= read -r line || [[ -n $line ]]; do
       (( ++n > 64 )) && break
@@ -122,6 +132,7 @@ read_config() {
         renumber)     [[ -n $renumber ]] || renumber=$val ;;
         empty_active) [[ -n $empty ]] || empty=$val ;;
         empty_names)  [[ -n $names ]] || names=$val ;;
+        keep_open)    [[ -n $keep ]] || keep=$val ;;
         *) config_warn "unknown option '$key' in $CONFIG_DIR/config (ignored)" ;;
       esac
     done <"$CONFIG_DIR/config"
@@ -141,6 +152,10 @@ read_config() {
   case "${names:-keep}" in
     keep|archive) EMPTY_NAMES=${names:-keep} ;;
     *) config_warn "unknown empty_names mode '$names' (want keep or archive); keeping"; EMPTY_NAMES=keep ;;
+  esac
+  case "${keep:-off}" in
+    off|one) KEEP_OPEN=${keep:-off} ;;
+    *) config_warn "unknown keep_open mode '$keep' (want off or one); off"; KEEP_OPEN=off ;;
   esac
 }
 
@@ -541,6 +556,78 @@ compact_unlocked() {
     skip_target=$active
   fi
 
+  # keep_open=one — hold ONE empty workspace open.
+  #
+  # Not renumbering the workspace you opened is only half of it: Hyprland
+  # destroys an empty non-persistent workspace the moment focus leaves, so the
+  # scratch workspace you just made evaporates as soon as you look away. The
+  # only thing that holds it is a persistent workspace rule, so plonk pins the
+  # one you are standing on and keeps it pinned WHILE YOU ARE AWAY. It is
+  # released when you have used it (it has windows) or replaced it (you opened
+  # a different empty one) — never merely because you left, which is the whole
+  # point. Exactly one is ever held, and only a pin plonk placed is ever
+  # removed: a workspace made persistent in your own Hyprland config
+  # (main-monitor.lua's PARK and friends) is not plonk's to manage.
+  ws_persist() { # id true|false — Lua config first, legacy keyword as fallback
+    hyprctl eval "hl.workspace_rule({ workspace = \"$1\", persistent = $2 })" >/dev/null 2>&1 ||
+      hyprctl keyword workspace "$1,persistent:$2" >/dev/null 2>&1
+  }
+  held_read() {
+    local id=
+    [[ -n $HELD_FILE && -f $HELD_FILE && ! -L $HELD_FILE ]] || { echo 0; return 0; }
+    IFS= read -r -n 16 id <"$HELD_FILE" 2>/dev/null || true
+    [[ $id =~ ^[0-9]+$ ]] && echo "$id" || echo 0
+  }
+  held_write() { # id, 0 clears
+    state_dir_ok || return 0
+    [[ -n $HELD_FILE && ! -L $HELD_FILE ]] || return 0
+    if (($1 == 0)); then rm -f -- "$HELD_FILE"
+    else printf '%s\n' "$1" >"$HELD_FILE"; fi
+  }
+  hold_open() {
+    [[ $KEEP_OPEN == one ]] || return 0
+    local prev want=0 cand_persistent prev_windows prev_exists
+    prev=$(held_read)
+    # You are standing on an empty, numeric workspace: it is a candidate. One
+    # already persistent from your own config is left alone unless it is the
+    # very pin we placed.
+    if ((active > 0 && active_windows == 0)); then
+      # jq's // treats FALSE as empty just like null, so `first // "none"` on a
+      # workspace with ispersistent:false answers "none". Convert explicitly.
+      cand_persistent=$(jq -r --argjson a "$active" \
+        '[.[] | select(.id == $a and ((.name // "") | test("^[0-9]+$"))) | .ispersistent]
+         | first | if . == null then "none" else tostring end' <<<"$workspaces")
+      if [[ $cand_persistent == false || $active == "$prev" ]]; then want=$active; fi
+    fi
+    if ((prev != 0)); then
+      prev_exists=$(jq -r --argjson p "$prev" 'any(.[]; .id == $p)' <<<"$workspaces")
+      prev_windows=$(jq -r --argjson p "$prev" '[.[] | select(.id == $p) | .windows] | first // 0' <<<"$workspaces")
+      if ((want != 0 && want != prev)); then
+        :                                   # replaced: release prev below
+      elif [[ $prev_exists == true ]] && ((prev_windows == 0)); then
+        want=$prev                          # still empty and still yours: keep holding it
+      fi
+    fi
+    ((prev == want)) && return 0
+    if ((dry)); then
+      ((prev != 0)) && echo "would release workspace $prev"
+      ((want != 0)) && echo "would hold workspace $want open"
+      return 0
+    fi
+    if ((prev != 0)); then
+      ws_persist "$prev" false
+      if ((quiet)); then echo "plonk: released workspace $prev" >&2
+      else echo "released workspace $prev"; fi
+    fi
+    if ((want != 0)); then
+      ws_persist "$want" true
+      if ((quiet)); then echo "plonk: holding workspace $want open" >&2
+      else echo "holding workspace $want open"; fi
+    fi
+    held_write "$want"
+  }
+  hold_open
+
   # Everything that rewrites the titles document happens here, in one place
   # and one atomic write: first titles follow their windows, then (opt-in)
   # the titles of workspaces that vanished go to the archive.
@@ -667,22 +754,25 @@ compact_unlocked() {
   active_seen=0
   while IFS=$'\t' read -r ws mon wins; do
     [[ $ws =~ ^[0-9]+$ ]] || continue
-    # An empty workspace has no windows to carry anywhere, so only change_id can
-    # renumber it. Under the move strategy leave it exactly where it is, without
-    # consuming the number it would have taken.
-    if ((wins == 0)) && [[ $RENUMBER != change_id ]]; then continue; fi
     # The empty workspace you are STANDING ON is yours: you opened it at that
     # number to put something in it, so leave it there. It keeps its slot
     # (blocked, so nothing else lands on it and merges into it) and takes no
-    # number from the pack. Hyprland drops it the moment you leave, and the
-    # pack is contiguous again without plonk touching it. An empty workspace
-    # another head is showing still packs — that is 1.2.2, a different
-    # workspace and a different question.
+    # number from the pack. An empty workspace another head is showing still
+    # packs — that is 1.2.2, a different workspace and a different question.
+    #
+    # This has to come BEFORE the move-strategy skip below, or under the
+    # default renumber=move it would `continue` without setting active_seen and
+    # the "sitting on an empty workspace above the pack" branch would relocate
+    # your focus off the workspace you just opened.
     if ((wins == 0 && ws == active)); then
       active_seen=1
       blocked[$ws]=1
       continue
     fi
+    # An empty workspace has no windows to carry anywhere, so only change_id can
+    # renumber it. Under the move strategy leave it exactly where it is, without
+    # consuming the number it would have taken.
+    if ((wins == 0)) && [[ $RENUMBER != change_id ]]; then continue; fi
     ((ws == active)) && active_seen=1
     while ((skip_target != 0 && target == skip_target)) || [[ -n ${blocked[$target]+x} ]]; do
       target=$((target + 1))
@@ -808,6 +898,13 @@ watch_connection() {
   is_compact_trigger() {
     case "$1" in
       openwindow|closewindow|movewindow|movewindowv2|destroyworkspace|destroyworkspacev2|moveworkspace|moveworkspacev2|monitoradded|monitorremoved|configreloaded)
+        return 0 ;;
+      # Creating a workspace opens no hole, which is why this was only ever
+      # listening for destruction. But keep_open=one has to react the moment
+      # you MAKE a workspace — that is the only chance to pin it before you
+      # look away and Hyprland drops it. Compacting on it is a no-op
+      # ("Already Plonked!") when there is nothing to close.
+      createworkspace|createworkspacev2)
         return 0 ;;
       *) return 1 ;;
     esac

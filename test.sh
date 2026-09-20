@@ -47,6 +47,7 @@ case "\$1" in
   clients) printf '%s\\n' '$clients' ;;
   layers) printf '%s\\n' "\${STUB_LAYERS:-{\}}" ;;
   dispatch) printf '%s\\n' "\$*" >>"$log"; echo ok ;;
+  eval) printf '%s\\n' "\$*" >>"$log"; echo ok ;;
   *) echo "unexpected hyprctl \$1" >&2; exit 1 ;;
 esac
 EOF
@@ -109,6 +110,7 @@ case "\$1" in
   workspaces) printf '%s\n' '[{"id":3,"name":"3","monitor":"eDP-1","windows":1},{"id":7,"name":"7","monitor":"eDP-1","windows":1}]' ;;
   clients) printf '%s\n' '[{"address":"0xa","workspace":{"id":3}},{"address":"0xb","workspace":{"id":7}}]' ;;
   dispatch) printf '%s\n' "\$*" >>"$log"; echo ok ;;
+  eval) printf '%s\n' "\$*" >>"$log"; echo ok ;;
   *) echo "unexpected hyprctl \$1" >&2; exit 1 ;;
 esac
 STUB
@@ -692,6 +694,7 @@ case "\$1" in
   clients) printf '%s\n' '$HOLE_CLIENTS' ;;
   layers) printf '%s\n' '{}' ;;
   dispatch) printf '%s\n' "\$*" >>"$log"; echo ok ;;
+  eval) printf '%s\n' "\$*" >>"$log"; echo ok ;;
   *) echo "unexpected hyprctl \$1" >&2; exit 1 ;;
 esac
 STUB
@@ -752,6 +755,7 @@ case "\$1" in
   workspaces) cat "$tmpdir/ws.json" ;;
   clients) printf '%s\\n' '$HOLE_CLIENTS' ;;
   dispatch) printf '%s\\n' "\$*" >>"$log"; echo ok ;;
+  eval) printf '%s\\n' "\$*" >>"$log"; echo ok ;;
   *) echo "unexpected hyprctl \$1" >&2; exit 1 ;;
 esac
 STUB
@@ -877,6 +881,73 @@ grep -F 'window.move' "$log" >/dev/null && fail "windows must never be merged in
 grep -F 'id = 2 })' "$log" >/dev/null && fail "nothing may be renumbered onto the workspace you are standing on"
 pass "nothing lands on the empty workspace you are standing on"
 
+# --- keep_open=one: hold ONE empty workspace open --------------------------
+# Fred 2026-09-20, after 1.2.5 only stopped the RENUMBER: "still killing the
+# new workspace I made." Hyprland drops an empty non-persistent workspace the
+# moment focus leaves, so the scratch workspace evaporated on the way out.
+held="$tmpdir/state-sandbox/held-workspace"
+mkdir -p "$tmpdir/state-sandbox"
+occupied_123='[{"id":1,"name":"1","monitor":"eDP-1","windows":3},{"id":2,"name":"2","monitor":"eDP-1","windows":1},{"id":3,"name":"3","monitor":"eDP-1","windows":4}'
+clients_123='[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":2}},{"address":"0xc","workspace":{"id":3}}]'
+
+# Standing on the empty workspace you opened: it gets pinned.
+rm -f "$held"
+write_stub '{"id":9}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":9}}]' \
+  "$occupied_123,{\"id\":9,\"name\":\"9\",\"monitor\":\"eDP-1\",\"windows\":0,\"ispersistent\":false}]" "$clients_123"
+out=$(PLONK_KEEP_OPEN=one run_plonk)
+grep -F 'persistent = true' "$log" >/dev/null || fail "the workspace you opened must be pinned, got: $(cat "$log")"
+grep -F 'workspace = "9"' "$log" >/dev/null || fail "the pin must name workspace 9, got: $(cat "$log")"
+[[ $(cat "$held" 2>/dev/null) == 9 ]] || fail "the held workspace must be recorded, got: $(cat "$held" 2>/dev/null)"
+pass "keep_open=one pins the empty workspace you opened"
+
+# THE BUG: you walk away and it must still be there. Held, still empty, you are
+# now on an occupied workspace -> nothing is released.
+printf '9\n' >"$held"
+write_stub '{"id":1}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":1}}]' \
+  "$occupied_123,{\"id\":9,\"name\":\"9\",\"monitor\":\"eDP-1\",\"windows\":0,\"ispersistent\":true}]" "$clients_123"
+out=$(PLONK_KEEP_OPEN=one run_plonk)
+grep -F 'persistent = false' "$log" >/dev/null && fail "leaving it must NOT release it, got: $(cat "$log")"
+[[ $(cat "$held" 2>/dev/null) == 9 ]] || fail "it must still be held after you leave, got: $(cat "$held" 2>/dev/null)"
+pass "the held workspace survives you leaving it"
+
+# Used: it has windows now, so it is a normal workspace and the pin goes.
+printf '9\n' >"$held"
+write_stub '{"id":1}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":1}}]' \
+  "$occupied_123,{\"id\":9,\"name\":\"9\",\"monitor\":\"eDP-1\",\"windows\":1,\"ispersistent\":true}]" \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":2}},{"address":"0xc","workspace":{"id":3}},{"address":"0xd","workspace":{"id":9}}]'
+out=$(PLONK_KEEP_OPEN=one run_plonk)
+grep -F 'persistent = false' "$log" >/dev/null || fail "a used workspace must be released, got: $(cat "$log")"
+[[ ! -s $held ]] || fail "the held record must be cleared once used, got: $(cat "$held" 2>/dev/null)"
+pass "the held workspace is released once you put something in it"
+
+# Replaced: you open a different empty one, so the pin moves. Only ever one.
+printf '9\n' >"$held"
+write_stub '{"id":5}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":5}}]' \
+  "$occupied_123,{\"id\":5,\"name\":\"5\",\"monitor\":\"eDP-1\",\"windows\":0,\"ispersistent\":false},{\"id\":9,\"name\":\"9\",\"monitor\":\"eDP-1\",\"windows\":0,\"ispersistent\":true}]" "$clients_123"
+out=$(PLONK_KEEP_OPEN=one run_plonk)
+grep -F 'persistent = false' "$log" >/dev/null || fail "the old hold must be released, got: $(cat "$log")"
+grep -E 'workspace = "5".*persistent = true' "$log" >/dev/null || fail "the new one must be pinned, got: $(cat "$log")"
+[[ $(cat "$held" 2>/dev/null) == 5 ]] || fail "only one is held at a time, got: $(cat "$held" 2>/dev/null)"
+pass "opening another empty workspace moves the hold, never keeps two"
+
+# Default off: the published behaviour is untouched, nothing is ever pinned.
+rm -f "$held"
+write_stub '{"id":9}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":9}}]' \
+  "$occupied_123,{\"id\":9,\"name\":\"9\",\"monitor\":\"eDP-1\",\"windows\":0,\"ispersistent\":false}]" "$clients_123"
+out=$(run_plonk)
+grep -F 'persistent' "$log" >/dev/null && fail "keep_open is opt-in; default must pin nothing, got: $(cat "$log")"
+[[ ! -e $held ]] || fail "default must record no hold"
+pass "keep_open defaults to off and pins nothing"
+
+# A workspace YOU made persistent in your Hyprland config is not plonk's.
+rm -f "$held"
+write_stub '{"id":7}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":7}}]' \
+  "$occupied_123,{\"id\":7,\"name\":\"7\",\"monitor\":\"eDP-1\",\"windows\":0,\"ispersistent\":true}]" "$clients_123"
+out=$(PLONK_KEEP_OPEN=one run_plonk)
+grep -F 'persistent' "$log" >/dev/null && fail "a config-persistent workspace must be left alone, got: $(cat "$log")"
+[[ ! -e $held ]] || fail "a config-persistent workspace must not be recorded as held"
+pass "a workspace persistent from your own config is never touched"
+
 # --- multi-monitor: the other head's empty active workspace is not a hole --
 # HDMI-1 (unfocused) is showing empty workspace 2; eDP-1 (focused, active 1)
 # has 1 and 4 occupied. 4 must go to 3, never be merged into HDMI's 2.
@@ -961,6 +1032,30 @@ grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$lo
   fail "openwindow above a gap must trigger a compact, log=$(cat "$log")"
 pass "watch compacts when a window opens above a gap"
 
+# --- watch: creating a workspace wakes the daemon ---------------------------
+# THE bug behind "still killing the new workspace I made": the watcher listened
+# for destroyworkspace but never createworkspace, so making a workspace woke
+# plonk not at all and keep_open never got its chance to pin it.
+write_stub '{"id":9}' '[{"name":"eDP-1","focused":true,"activeWorkspace":{"id":9}}]' \
+  '[{"id":1,"name":"1","monitor":"eDP-1","windows":1}]' '[{"address":"0xa","workspace":{"id":1}}]'
+printf '%s\n' '[{"id":1,"name":"1","monitor":"eDP-1","windows":1}]' >"$tmpdir/ws.json"
+printf '%s\n' '[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":9,"name":"9","monitor":"eDP-1","windows":0,"ispersistent":false}]' >"$tmpdir/ws-new.json"
+sed -i "s|workspaces) printf .*|workspaces) cat '$tmpdir/ws.json' ;;|" "$stub/hyprctl"
+cat >"$tmpdir/create-late.sh" <<GEN
+exec 2>/dev/null
+sleep 0.6
+cp '$tmpdir/ws-new.json' '$tmpdir/ws.json'
+echo 'createworkspace>>9'
+sleep 1
+GEN
+rm -f "$SOCK" "$tmpdir/state-sandbox/held-workspace"
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sh '$tmpdir/create-late.sh'" &
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+PLONK_KEEP_OPEN=one run_watch_once >/dev/null
+grep -F 'persistent = true' "$log" >/dev/null ||
+  fail "createworkspace must wake the watcher so the new workspace is pinned, log=$(cat "$log")"
+pass "watch pins the workspace you just created"
+
 # --- watch: compacts once on connect, with no events at all ------------------
 write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
 start_event_socket "$SOCK" ''
@@ -1012,6 +1107,7 @@ case "\$1" in
   clients) printf '%s\n' '[{"address":"0xa","workspace":{"id":3}}]' ;;
   layers) printf '%s\n' '{}' ;;
   dispatch) printf '%s\n' "\$*" >>"$log"; echo ok ;;
+  eval) printf '%s\n' "\$*" >>"$log"; echo ok ;;
   *) echo "unexpected hyprctl \$1" >&2; exit 1 ;;
 esac
 STUB
