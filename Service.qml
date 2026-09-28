@@ -5,9 +5,15 @@ Item {
   id: root
 
   property var manifest: null
+  // Omarchy 4.0.4+ strips __sourceDir from third-party manifests, so fall
+  // back to this file's own location: plonk ships next to Service.qml.
+  readonly property string ownPlonkPath: {
+    var url = Qt.resolvedUrl("plonk").toString()
+    return url.indexOf("file://") === 0 ? decodeURIComponent(url.slice(7)) : ""
+  }
   readonly property string plonkPath: manifest && manifest.__sourceDir
     ? manifest.__sourceDir + "/plonk"
-    : ""
+    : ownPlonkPath
   property int lastExitCode: -1
 
   function startWatcher() {
