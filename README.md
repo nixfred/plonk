@@ -50,7 +50,15 @@ Hyprland workspace IDs are global. Plonk reads the compositor's workspace and cl
 
 An **empty** workspace that a monitor is currently showing packs too: it holds a number and every bar draws it, so leaving it behind is the same gap. A second head parked on an empty workspace 7 is why a bar can read `1 2 3 7`. The one exception is the empty workspace **you are standing on**: open a scratch workspace at 9 and it stays at 9, with your focus on it, because you chose that number. It takes no slot from the pack and nothing is renumbered onto it.
 
-By default Hyprland still drops that workspace the moment you look away, because an empty non-persistent workspace does not survive losing focus. Set **`keep_open=one`** and Plonk holds it for you: the empty workspace you are standing on is pinned with a persistent workspace rule, so it is still there when you come back. It is released the moment you **use** it (it has windows, so it is an ordinary workspace again) or **replace** it (you open a different empty one, and the hold moves). Exactly one is ever held, so it can never leave more than a single gap, and Plonk only ever removes a pin it placed itself — a workspace you made persistent in your own Hyprland config is never touched. Only `change_id` can renumber one — there are no windows to carry — so under the default move strategy it stays where it is, without consuming the number. A workspace marked `persistent` is configured to own its number and is always left alone.
+By default Hyprland still drops that workspace the moment you look away, because an empty non-persistent workspace does not survive losing focus. Set **`keep_open=one`** and Plonk holds it for you: the empty workspace you are standing on is pinned with a persistent workspace rule, so it is still there when you come back. It is released the moment you **use** it (it has windows, so it is an ordinary workspace again) or **replace** it (you open a different empty one, and the hold moves). Exactly one is ever held, so it can never leave more than a single gap, and Plonk only ever removes a pin it placed itself — a workspace you made persistent in your own Hyprland config is never touched.
+
+### A workspace that looks empty but will not clear
+
+Plonk closes gaps in the number line, but it can only close a workspace that really is empty, and Hyprland counts a window whether or not you can see it. A **floating** window keeps its absolute coordinates when the monitor it was placed on is unplugged, rearranged or reconnected (a dock, a sidecar tablet, a clamshell switch), so it can end up wholly outside every screen. The workspace then reports `windows: 1`, draws as blank, and stays in your bar forever, which looks exactly like Plonk failing to clear it. Tiled windows are re-laid-out and cannot strand this way.
+
+Set **`rescue_stranded=on`** and Plonk brings such a window back. A window qualifies only if it is floating, mapped, on a numbered workspace (special workspaces and dropdowns park things off-screen on purpose), and shares **no area at all** with any enabled monitor: a window with any part on a screen is reachable and is left alone. It is resized to fit (never above 80% of the monitor, never grown) and centred on the monitor its workspace lives on, using the monitor's real origin, scale and rotation. It stays on its workspace and stays floating; nothing is closed and nothing changes workspace.
+
+The check rides the rounds that ordinary events already start, so a window stranded by a monitor change is brought back on the next open, close or move, with no polling. A window that refuses to move is retried five times, then given up on with a single warning rather than being dispatched at forever. `plonk --dry-run` shows what it would do. It is off by default because the headline promise is that Plonk does not rearrange your windows. Only `change_id` can renumber one — there are no windows to carry — so under the default move strategy it stays where it is, without consuming the number. A workspace marked `persistent` is configured to own its number and is always left alone.
 
 By default a workspace is renumbered by moving its windows to the new number and pinning that workspace to the original monitor. Every bar follows the create/destroy events this produces, so the number line updates everywhere.
 
@@ -119,7 +127,7 @@ Clone the repository, pin the release you reviewed, and install the script from 
 git clone https://github.com/nixfred/plonk.git
 cd plonk
 git tag --list          # pick a release
-git checkout v1.2.6     # pin it, then read plonk before installing
+git checkout v1.3.0     # pin it, then read plonk before installing
 install -Dm755 plonk ~/.local/bin/plonk
 ```
 
@@ -187,6 +195,7 @@ renumber=move       # or change_id — see "How it works"   (env PLONK_RENUMBER)
 empty_active=keep   # or fill — see "Auto-plonk"          (env PLONK_EMPTY_ACTIVE)
 empty_names=keep    # or archive — preserve old names without reserving vanished slots (env PLONK_EMPTY_NAMES)
 keep_open=off       # or one — hold ONE empty workspace open            (env PLONK_KEEP_OPEN)
+rescue_stranded=off # or on — bring back a floating window stranded off-screen (env PLONK_RESCUE_STRANDED)
 ```
 
 `PLONK_FILL_DELAY_MS` (default 300) is the grace before `fill` jumps, so a window you open right after closing the last one still lands on the workspace you were on. The older one-line `~/.config/plonk/renumber` file is still honored. Unknown keys are reported once and ignored.

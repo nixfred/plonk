@@ -24,6 +24,8 @@
 # at, takes no slot from the pack, and nothing is renumbered onto it. With
 # keep_open=one it is also pinned persistent so Hyprland does not drop it when
 # you look away; released once you use it or open a different empty one.
+# rescue_stranded=on brings back a floating window that is wholly off every
+# monitor — the usual reason a workspace that LOOKS empty never clears.
 # If you were sitting on an empty workspace you land on the first free slot
 # after the compacted ones. Silent by default: --notify adds a desktop
 # notification (omarchy-notification-send / notify-send) in any mode.
@@ -105,6 +107,7 @@ RENUMBER=move
 EMPTY_ACTIVE=keep
 EMPTY_NAMES=keep
 KEEP_OPEN=off
+RESCUE_STRANDED=off
 CONFIG_WARNED=
 config_warn() { # once per process: a daemon must not repeat this every round
   [[ -n $CONFIG_WARNED ]] && return 0
@@ -119,7 +122,7 @@ config_file_usable() {
   (( size <= 65536 ))
 }
 read_config() {
-  local renumber=${PLONK_RENUMBER:-} empty=${PLONK_EMPTY_ACTIVE:-} names=${PLONK_EMPTY_NAMES:-} keep=${PLONK_KEEP_OPEN:-} line key val n=0
+  local renumber=${PLONK_RENUMBER:-} empty=${PLONK_EMPTY_ACTIVE:-} names=${PLONK_EMPTY_NAMES:-} keep=${PLONK_KEEP_OPEN:-} rescue=${PLONK_RESCUE_STRANDED:-} line key val n=0
   if [[ -n $CONFIG_DIR ]] && config_file_usable "$CONFIG_DIR/config"; then
     while IFS= read -r line || [[ -n $line ]]; do
       (( ++n > 64 )) && break
@@ -133,6 +136,7 @@ read_config() {
         empty_active) [[ -n $empty ]] || empty=$val ;;
         empty_names)  [[ -n $names ]] || names=$val ;;
         keep_open)    [[ -n $keep ]] || keep=$val ;;
+        rescue_stranded) [[ -n $rescue ]] || rescue=$val ;;
         *) config_warn "unknown option '$key' in $CONFIG_DIR/config (ignored)" ;;
       esac
     done <"$CONFIG_DIR/config"
@@ -156,6 +160,10 @@ read_config() {
   case "${keep:-off}" in
     off|one) KEEP_OPEN=${keep:-off} ;;
     *) config_warn "unknown keep_open mode '$keep' (want off or one); off"; KEEP_OPEN=off ;;
+  esac
+  case "${rescue:-off}" in
+    off|on) RESCUE_STRANDED=${rescue:-off} ;;
+    *) config_warn "unknown rescue_stranded mode '$rescue' (want off or on); off"; RESCUE_STRANDED=off ;;
   esac
 }
 
@@ -204,6 +212,10 @@ for c in hyprctl jq; do command -v "$c" >/dev/null || { echo "plonk: $c not foun
 # but socket2 events carry the bare hex ("movewindowv2>>5587fd748d40,3,3").
 COMPACT_LOCK_SKIPPED=0
 declare -A OWN_MOVES=() OWN_DESTROYS=() OWN_WSMOVES=()
+# rescue_stranded: how many rounds in a row each window has been found stranded
+# and pushed back. Kept across rounds so a window that will not move is given up
+# on (one warning) instead of being dispatched at on every event forever.
+declare -A RESCUE_TRIES=()
 
 clear_own_events() {
   OWN_MOVES=()
@@ -247,7 +259,12 @@ compact() {
     fi
   fi
   compact_unlocked || rc=$?
-  exec 9>&- 2>/dev/null || true
+  # Scope the redirect to the close. A bare `exec 9>&- 2>/dev/null` applies BOTH
+  # redirections to this whole shell, permanently: after the daemon's first
+  # round its stderr was /dev/null for the rest of its life, so every message
+  # it ever printed (plonked/held/released/rescued, update restarts, config and
+  # names-file warnings, errors) vanished and the journal stayed empty.
+  { exec 9>&-; } 2>/dev/null || true
   return "$rc"
 }
 
@@ -268,6 +285,91 @@ compact_unlocked() {
   active=$snapshot_active
   new_active=$active
   moves=0
+
+  # rescue_stranded=on — bring back a floating window that is wholly off every
+  # monitor.
+  #
+  # A workspace that LOOKS empty but never clears is nearly always holding one:
+  # a floating window keeps its absolute coordinates when the monitor it was
+  # placed on goes away or is rearranged (a docking station, an LG reconnect, a
+  # tablet sidecar), while tiled windows are re-laid-out and cannot strand.
+  # Hyprland reports the workspace as occupied, so plonk correctly leaves it
+  # alone — and the user is staring at an empty screen wondering why. There is
+  # nothing for the pack to close here; the window has to come back.
+  #
+  # Strictly: floating, mapped, on a NUMBERED workspace (special workspaces and
+  # their dropdowns are positioned off-screen on purpose), and sharing no
+  # area at all with any enabled monitor. A window with any part on a screen is
+  # reachable and is none of plonk's business. Geometry is logical
+  # (width/scale, swapped for a 90/270 degree transform) from the monitor's real
+  # origin: it is not at 0,0 on every layout.
+  rescue_stranded() {
+    [[ $RESCUE_STRANDED == on ]] || return 0
+    local plan addr wsid tw th tx ty cls stranded_now="|" tries
+    plan=$(jq -r --argjson mon "$monitors" --argjson ws "$workspaces" '
+      [ $mon[]? | select(.disabled != true)
+        | ((.scale // 1) | if . > 0 then . else 1 end) as $sc
+        | (((.transform // 0) % 2) == 1) as $turned
+        | { name, x, y, focused: (.focused == true),
+            w: ((if $turned then .height else .width end) / $sc),
+            h: ((if $turned then .width  else .height end) / $sc) } ] as $rects
+      | if ($rects | length) == 0 then empty else
+        .[]
+        | select(.floating == true and .mapped == true and (.hidden != true)
+                 and ((.workspace.id // 0) > 0) and ((.fullscreen // 0) == 0)
+                 and ((.address // "") | test("^0x[0-9a-fA-F]+$")))
+        | . as $c
+        | select([ $rects[]
+                   | ((([$c.at[0] + $c.size[0], .x + .w] | min) - ([$c.at[0], .x] | max)) > 0)
+                     and ((([$c.at[1] + $c.size[1], .y + .h] | min) - ([$c.at[1], .y] | max)) > 0)
+                 ] | any | not)
+        # Home monitor: the one its workspace lives on, else the focused one.
+        | ([ $ws[] | select(.id == $c.workspace.id) | .monitor ] | first // "") as $home
+        | ( ([ $rects[] | select(.name == $home) ] | first)
+            // ([ $rects[] | select(.focused) ] | first)
+            // $rects[0] ) as $m
+        # Keep its size but never let it be bigger than 80% of that monitor.
+        | ([ $c.size[0], (($m.w * 0.8) | floor) ] | min) as $w
+        | ([ $c.size[1], (($m.h * 0.8) | floor) ] | min) as $h
+        | [ $c.address, $c.workspace.id, $w, $h,
+            (($m.x + (($m.w - $w) / 2)) | floor), (($m.y + (($m.h - $h) / 2)) | floor),
+            (($c.class // "?") | gsub("[\t\n]"; " ")) ]
+        | @tsv
+      end' <<<"$clients" 2>/dev/null) || return 0
+
+    while IFS=$'\t' read -r addr wsid tw th tx ty cls; do
+      # An empty address silently targets the ACTIVE window in a dispatch; the
+      # jq above only emits well-formed addresses, this is the second lock.
+      [[ $addr =~ ^0x[0-9a-fA-F]+$ ]] || continue
+      [[ $tw =~ ^[0-9]+$ && $th =~ ^[0-9]+$ && $tx =~ ^-?[0-9]+$ && $ty =~ ^-?[0-9]+$ ]] || continue
+      stranded_now+="$addr|"
+      tries=${RESCUE_TRIES[$addr]:-0}
+      if ((tries >= 5)); then
+        ((tries == 5)) && echo "plonk: cannot bring '$cls' (workspace $wsid) back on screen after 5 tries; leaving it" >&2
+        RESCUE_TRIES[$addr]=6
+        continue
+      fi
+      if ((dry)); then
+        echo "would rescue '$cls' on workspace $wsid -> ${tw}x${th} at $tx,$ty"
+        continue
+      fi
+      RESCUE_TRIES[$addr]=$((tries + 1))
+      # Resize FIRST, then move, in absolute terms: moving a window that is
+      # larger than its new home would leave part of it off the edge.
+      hypr_dispatch "hl.dsp.window.resize({ x = $tw, y = $th, relative = false, window = \"address:$addr\" })" \
+        resizewindowpixel "exact $tw $th,address:$addr"
+      hypr_dispatch "hl.dsp.window.move({ x = $tx, y = $ty, relative = false, window = \"address:$addr\" })" \
+        movewindowpixel "exact $tx $ty,address:$addr"
+      if ((quiet)); then echo "plonk: rescued '$cls' stranded off-screen on workspace $wsid" >&2
+      else echo "rescued '$cls' stranded off-screen on workspace $wsid"; fi
+    done <<<"$plan"
+
+    # A window that is back on screen starts from zero if it ever strands again.
+    for addr in "${!RESCUE_TRIES[@]}"; do
+      [[ $stranded_now == *"|$addr|"* ]] || unset "RESCUE_TRIES[$addr]"
+    done
+  }
+  rescue_stranded
 
   local -A taken=() blocked=()
   while IFS= read -r id; do

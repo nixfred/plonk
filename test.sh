@@ -948,6 +948,149 @@ grep -F 'persistent' "$log" >/dev/null && fail "a config-persistent workspace mu
 [[ ! -e $held ]] || fail "a config-persistent workspace must not be recorded as held"
 pass "a workspace persistent from your own config is never touched"
 
+# --- rescue_stranded: a floating window that is wholly off every monitor ----
+# Fred 2026-10-18: "Workspace two is empty and it is not clearing." It was not
+# empty. It held a floating window at (-2619,-3104) on a monitor that sits at
+# (0,-720) — a position left over from a layout that no longer exists. Hyprland
+# counts the window, plonk correctly leaves an occupied workspace alone, and the
+# user stares at a blank screen.
+mkwin() { # address class workspace floating x y w h [hidden]
+  printf '{"address":"%s","class":"%s","workspace":{"id":%s},"floating":%s,"mapped":true,"hidden":%s,"fullscreen":0,"at":[%s,%s],"size":[%s,%s]}' \
+    "$1" "$2" "$3" "$4" "${9:-false}" "$5" "$6" "$7" "$8"
+}
+DP3='[{"name":"DP-3","focused":true,"x":0,"y":-720,"width":5120,"height":2160,"scale":1,"transform":0,"activeWorkspace":{"id":1}}]'
+WS12='[{"id":1,"name":"1","monitor":"DP-3","windows":1},{"id":2,"name":"2","monitor":"DP-3","windows":1}]'
+tiled=$(mkwin 0xaa kitty 1 false 10 20 800 600)
+stranded=$(mkwin 0xdead grok-bot 2 true -2619 -3104 2758 2009)
+
+# Off by default: the published behaviour is untouched.
+write_stub '{"id":1}' "$DP3" "$WS12" "[$tiled,$stranded]"
+out=$(run_plonk)
+grep -E 'window\.(resize|move)' "$log" >/dev/null && fail "rescue_stranded is opt-in; default must move nothing, got: $(cat "$log")"
+pass "rescue_stranded defaults to off and moves nothing"
+
+# On: resize first, then move, absolute, centred on the monitor's REAL origin.
+# 5120x2160 at (0,-720): width stays 2758, height is capped at 80% = 1728,
+# x = (5120-2758)/2 = 1181, y = -720 + (2160-1728)/2 = -504.
+: >"$log"
+out=$(PLONK_RESCUE_STRANDED=on run_plonk)
+grep -F 'rescued' <<<"$out" >/dev/null || fail "the rescue must be reported, got: $out"
+r=$(grep -n 'hl.dsp.window.resize({ x = 2758, y = 1728, relative = false, window = "address:0xdead" })' "$log" | cut -d: -f1)
+m=$(grep -n 'hl.dsp.window.move({ x = 1181, y = -504, relative = false, window = "address:0xdead" })' "$log" | cut -d: -f1)
+[[ -n $r && -n $m ]] || fail "expected an absolute resize and move to 2758x1728 at 1181,-504, got: $(cat "$log")"
+((r < m)) || fail "resize must come BEFORE move so the window never overhangs its new home, got: $(cat "$log")"
+grep -F 'address:0xaa' "$log" >/dev/null && fail "the visible tiled window must not be touched, got: $(cat "$log")"
+pass "a stranded floating window is resized then moved, centred on the monitor's real origin"
+
+# --dry-run plans it and dispatches nothing.
+: >"$log"
+out=$(PLONK_RESCUE_STRANDED=on run_plonk --dry-run)
+grep -F "would rescue 'grok-bot' on workspace 2 -> 2758x1728 at 1181,-504" <<<"$out" >/dev/null || fail "dry run must plan the rescue, got: $out"
+grep -E 'window\.(resize|move)' "$log" >/dev/null && fail "dry run must dispatch nothing, got: $(cat "$log")"
+pass "--dry-run plans the rescue without moving anything"
+
+# Things that are NOT stranded must be left strictly alone.
+partly=$(mkwin 0xb1 kitty 2 true -100 100 400 300)              # 300px of it is on screen
+tile_off=$(mkwin 0xb2 kitty 2 false -9000 -9000 400 300)        # tiled: the layout owns it
+special=$(mkwin 0xb3 quake -98 true -9000 -9000 400 300)        # special workspace: parked off-screen on purpose
+hid=$(mkwin 0xb4 kitty 2 true -9000 -9000 400 300 true)         # hidden
+write_stub '{"id":1}' "$DP3" "$WS12" "[$tiled,$partly,$tile_off,$special,$hid]"
+: >"$log"
+out=$(PLONK_RESCUE_STRANDED=on run_plonk)
+grep -E 'window\.(resize|move)' "$log" >/dev/null && fail "only floating, mapped, visible-nowhere windows on a numbered workspace qualify, got: $(cat "$log")"
+pass "partly visible, tiled, special-workspace and hidden windows are never rescued"
+
+# A window with no usable address must never reach a dispatch: an empty address
+# silently targets the ACTIVE window.
+noaddr=$(mkwin "" grok-bot 2 true -2619 -3104 2758 2009)
+badaddr=$(mkwin "0xZZ" grok-bot 2 true -2619 -3104 2758 2009)
+write_stub '{"id":1}' "$DP3" "$WS12" "[$tiled,$noaddr,$badaddr]"
+: >"$log"
+out=$(PLONK_RESCUE_STRANDED=on run_plonk)
+grep -E 'window\.(resize|move)' "$log" >/dev/null && fail "a missing or malformed address must never be dispatched at, got: $(cat "$log")"
+pass "a window with an empty or malformed address is never dispatched at"
+
+# No monitor information at all: there is nothing to compare against.
+write_stub '{"id":1}' '[]' "$WS12" "[$tiled,$stranded]"
+: >"$log"
+out=$(PLONK_RESCUE_STRANDED=on run_plonk)
+grep -E 'window\.(resize|move)' "$log" >/dev/null && fail "with no monitors known, nothing may be moved, got: $(cat "$log")"
+pass "no monitor information means no rescue"
+
+# Scale: geometry is logical. 3840x2400 at scale 2 is a 1920x1200 desktop.
+HIDPI='[{"name":"eDP-1","focused":true,"x":0,"y":0,"width":3840,"height":2400,"scale":2,"transform":0,"activeWorkspace":{"id":1}}]'
+WS12E='[{"id":1,"name":"1","monitor":"eDP-1","windows":1},{"id":2,"name":"2","monitor":"eDP-1","windows":1}]'
+big=$(mkwin 0xc1 kitty 2 true -5000 -5000 3000 2000)
+write_stub '{"id":1}' "$HIDPI" "$WS12E" "[$tiled,$big]"
+: >"$log"
+out=$(PLONK_RESCUE_STRANDED=on run_plonk)
+grep -F 'resize({ x = 1536, y = 960,' "$log" >/dev/null || fail "a scale-2 monitor is 1920x1200 logical, 80% is 1536x960, got: $(cat "$log")"
+grep -F 'move({ x = 192, y = 120,' "$log" >/dev/null || fail "centred in logical coordinates, got: $(cat "$log")"
+pass "rescue geometry is logical (scale-adjusted)"
+
+# Rotation: a 90 degree transform swaps width and height.
+TURNED='[{"name":"eDP-1","focused":true,"x":0,"y":0,"width":1920,"height":1080,"scale":1,"transform":1,"activeWorkspace":{"id":1}}]'
+small=$(mkwin 0xc2 kitty 2 true -5000 -5000 500 400)
+write_stub '{"id":1}' "$TURNED" "$WS12E" "[$tiled,$small]"
+: >"$log"
+out=$(PLONK_RESCUE_STRANDED=on run_plonk)
+grep -F 'move({ x = 290, y = 760,' "$log" >/dev/null || fail "a rotated 1920x1080 is 1080x1920; 500x400 centres at 290,760, got: $(cat "$log")"
+pass "rescue geometry follows a rotated monitor"
+
+# Two monitors: it goes home — the monitor its workspace lives on.
+TWOMON='[{"name":"A","focused":true,"x":0,"y":0,"width":1920,"height":1080,"scale":1,"transform":0,"activeWorkspace":{"id":1}},{"name":"B","focused":false,"x":1920,"y":0,"width":1920,"height":1080,"scale":1,"transform":0,"activeWorkspace":{"id":5}}]'
+WSAB='[{"id":1,"name":"1","monitor":"A","windows":1},{"id":5,"name":"5","monitor":"B","windows":2}]'
+onb=$(mkwin 0xd1 kitty 5 true 2100 100 600 400)                  # fine, on monitor B
+lost=$(mkwin 0xd2 kitty 5 true -9000 -9000 600 400)
+write_stub '{"id":1}' "$TWOMON" "$WSAB" "[$tiled,$onb,$lost]"
+: >"$log"
+out=$(PLONK_RESCUE_STRANDED=on run_plonk)
+grep -F 'address:0xd1' "$log" >/dev/null && fail "a window sitting on monitor B is not stranded, got: $(cat "$log")"
+grep -F 'move({ x = 2580, y = 340, relative = false, window = "address:0xd2" })' "$log" >/dev/null ||
+  fail "it must land on its workspace's monitor (B), centred at 2580,340, got: $(cat "$log")"
+pass "a stranded window goes to the monitor its workspace lives on"
+
+# --- watch: the daemon rescues on an ordinary event, and gives up cleanly -----
+# Stranding happens silently (Hyprland sends no event when a monitor goes), so
+# the rescue has to ride the rounds that ordinary events already start.
+write_stub '{"id":1}' "$DP3" "$WS12" "[$tiled]"
+printf '%s\n' "[$tiled]" >"$tmpdir/clients.json"
+printf '%s\n' "[$tiled,$stranded]" >"$tmpdir/clients-lost.json"
+sed -i "s|clients) printf .*|clients) cat '$tmpdir/clients.json' ;;|" "$stub/hyprctl"
+cat >"$tmpdir/strand-late.sh" <<GEN
+exec 2>/dev/null
+sleep 0.6
+cp '$tmpdir/clients-lost.json' '$tmpdir/clients.json'
+echo 'openwindow>>0xee,2,kitty,kitty'
+sleep 1
+GEN
+rm -f "$SOCK"
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sh '$tmpdir/strand-late.sh'" &
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_RESCUE_STRANDED=on \
+  PATH="$stub:$PATH" timeout 3 "$PLONK" --watch >/dev/null 2>"$tmpdir/watch.err" || true
+grep -F 'window = "address:0xdead"' "$log" >/dev/null || fail "the daemon must rescue on an ordinary event, log=$(cat "$log")"
+grep -F "rescued 'grok-bot' stranded off-screen on workspace 2" "$tmpdir/watch.err" >/dev/null ||
+  fail "the daemon must say so on stderr, got: $(cat "$tmpdir/watch.err")"
+pass "watch rescues a stranded window on the next ordinary event, and says so"
+
+# A window that will not move is given up on: five tries, one warning, no loop.
+write_stub '{"id":1}' "$DP3" "$WS12" "[$tiled,$stranded]"
+cat >"$tmpdir/many-events.sh" <<GEN
+exec 2>/dev/null
+for i in 1 2 3 4 5 6 7 8; do sleep 0.45; echo 'openwindow>>0xee,2,kitty,kitty'; done
+sleep 0.5
+GEN
+rm -f "$SOCK"
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sh '$tmpdir/many-events.sh'" &
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig PLONK_RESCUE_STRANDED=on \
+  PATH="$stub:$PATH" timeout 7 "$PLONK" --watch >/dev/null 2>"$tmpdir/watch.err" || true
+n=$(grep -c 'window.resize' "$log" || true)
+[[ $n == 5 ]] || fail "a window that will not move gets exactly 5 tries, got $n: $(cat "$log")"
+[[ $(grep -c 'cannot bring' "$tmpdir/watch.err") == 1 ]] || fail "it must give up once, loudly, got: $(cat "$tmpdir/watch.err")"
+pass "a window that will not move is given up on after five tries, once, loudly"
+
 # --- multi-monitor: the other head's empty active workspace is not a hole --
 # HDMI-1 (unfocused) is showing empty workspace 2; eDP-1 (focused, active 1)
 # has 1 and 4 occupied. 4 must go to 3, never be merged into HDMI's 2.
@@ -1031,6 +1174,33 @@ run_watch_once >/dev/null
 grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "3", id = 2 })' "$log" >/dev/null ||
   fail "openwindow above a gap must trigger a compact, log=$(cat "$log")"
 pass "watch compacts when a window opens above a gap"
+
+# --- watch: the daemon keeps its stderr after the first round -----------------
+# compact() used to end with `exec 9>&- 2>/dev/null`. A bare exec applies BOTH
+# redirections to the whole shell, so after the first round the daemon's stderr
+# was /dev/null for good and every message it printed vanished (the journal
+# stayed empty for weeks). Every other watcher test throws stderr away, which is
+# why nothing caught it. This one reads it, and the message that matters comes
+# from the SECOND round, after the old line had already run.
+write_stub '{"id":1}' '[{"name":"eDP-1"}]' "$HOLE_GONE" "$HOLE_CLIENTS"
+printf '%s\n' '[{"id":1,"name":"1","monitor":"eDP-1","windows":1}]' >"$tmpdir/ws.json"
+printf '%s\n' "$HOLE_GONE" >"$tmpdir/ws-hole.json"
+sed -i "s|workspaces) printf .*|workspaces) cat '$tmpdir/ws.json' ;;|" "$stub/hyprctl"
+cat >"$tmpdir/second-round.sh" <<GEN
+exec 2>/dev/null
+sleep 0.6
+cp '$tmpdir/ws-hole.json' '$tmpdir/ws.json'
+echo 'openwindow>>0xc,4,kitty,kitty'
+sleep 1
+GEN
+rm -f "$SOCK"
+socat UNIX-LISTEN:"$SOCK",unlink-early SYSTEM:"sh '$tmpdir/second-round.sh'" &
+for _ in $(seq 1 40); do [[ -S $SOCK ]] && break; sleep 0.05; done
+XDG_RUNTIME_DIR="$tmpdir" HYPRLAND_INSTANCE_SIGNATURE=watchsig \
+  PATH="$stub:$PATH" timeout 3 "$PLONK" --watch >/dev/null 2>"$tmpdir/watch.err" || true
+grep -F 'plonked workspace 3 -> 2' "$tmpdir/watch.err" >/dev/null ||
+  fail "the daemon's second round must still be able to print to stderr, got: $(cat "$tmpdir/watch.err")"
+pass "watch keeps its stderr after the first round"
 
 # --- watch: creating a workspace wakes the daemon ---------------------------
 # THE bug behind "still killing the new workspace I made": the watcher listened
