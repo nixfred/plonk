@@ -1444,4 +1444,60 @@ cmp "$archive_names" "$tmpdir/archive-before.json" || fail "damaged archive must
 [[ ! -s $log ]] || fail "damaged archive must not move windows"
 pass "archive mode protects live empty workspaces and damaged archives"
 
+# --- group_monitors: each monitor's workspaces stay together ----------------
+# Fred's real layout 2026-10-18: LG (x=0) has 1,2,4; Samsung (x=5120) has 3.
+# Grouped, LG takes 1-3 and Samsung 4: workspaces 3 and 4 trade places, which
+# needs a spare number because change_id refuses a taken id.
+GM_MON='[{"name":"HDMI-A-1","x":5120,"y":0,"focused":false,"activeWorkspace":{"id":3}},{"name":"DP-3","x":0,"y":-720,"focused":true,"activeWorkspace":{"id":4}}]'
+GM_WS='[{"id":1,"name":"1","monitor":"DP-3","windows":1},{"id":2,"name":"2","monitor":"DP-3","windows":1},{"id":3,"name":"3","monitor":"HDMI-A-1","windows":1},{"id":4,"name":"4","monitor":"DP-3","windows":1}]'
+GM_CL='[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":2}},{"address":"0xc","workspace":{"id":3}},{"address":"0xd","workspace":{"id":4}}]'
+write_stub '{"id":4}' "$GM_MON" "$GM_WS" "$GM_CL"
+out=$(run_plonk)
+[[ $out == "plonk: Already Plonked!" ]] || fail "group_monitors defaults to off, got: $out"
+[[ ! -s $log ]] || fail "off must dispatch nothing, log=$(cat "$log")"
+out=$(PLONK_GROUP_MONITORS=on run_plonk --dry-run)
+grep -Fx 'would plonk workspace 4 -> 3 (DP-3)' <<<"$out" >/dev/null || fail "grouped dry-run plan 4 -> 3, got: $out"
+grep -Fx 'would plonk workspace 3 -> 4 (HDMI-A-1)' <<<"$out" >/dev/null || fail "grouped dry-run plan 3 -> 4, got: $out"
+[[ ! -s $log ]] || fail "grouped dry-run must dispatch nothing"
+out=$(PLONK_GROUP_MONITORS=on run_plonk)
+mapfile -t cid < <(grep -o 'workspace = "[0-9]*", id = [0-9]*' "$log" | tr -d '",=' | awk '{print $2"->"$4}')
+[[ ${cid[*]} == "4->101 3->4 101->3" ]] || fail "swap goes through a spare, got: ${cid[*]}"
+grep -Fx 'plonked workspace 3 -> 4 (HDMI-A-1)' <<<"$out" >/dev/null || fail "reports the real swap, got: $out"
+grep -Fx 'plonked workspace 4 -> 3 (DP-3)' <<<"$out" >/dev/null || fail "reports the hop as one move, got: $out"
+grep -F '101' <<<"$out" >/dev/null && fail "the spare number is never reported, got: $out"
+grep -Fx 'dispatch hl.dsp.focus({ workspace = "3" })' "$log" >/dev/null || fail "focus follows the focused monitor's workspace 4 to 3, log=$(cat "$log")"
+pass "group_monitors: a swap between monitors hops through a spare, once"
+
+# No swap: B(x=100) lists first but sits right of A. A has 1,5; B has 2.
+# Grouped: A 1,2 and B 3. B's 2 must clear to 3 BEFORE A's 5 lands on 2.
+write_stub '{"id":1}' \
+  '[{"name":"B","x":100,"y":0,"activeWorkspace":{"id":2}},{"name":"A","x":0,"y":0,"focused":true,"activeWorkspace":{"id":1}}]' \
+  '[{"id":1,"name":"1","monitor":"A","windows":1},{"id":2,"name":"2","monitor":"B","windows":1},{"id":5,"name":"5","monitor":"A","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":2}},{"address":"0xc","workspace":{"id":5}}]'
+PLONK_GROUP_MONITORS=on run_plonk >/dev/null
+mapfile -t cid < <(grep -o 'workspace = "[0-9]*", id = [0-9]*' "$log" | tr -d '",=' | awk '{print $2"->"$4}')
+[[ ${cid[*]} == "2->3 5->2" ]] || fail "orders by what is free, never onto a used number: ${cid[*]}"
+pass "group_monitors: monitors run left to right and moves wait for a free number"
+
+# Already grouped: nothing to do. A persistent workspace keeps its number.
+write_stub '{"id":1}' \
+  '[{"name":"A","x":0,"y":0,"focused":true,"activeWorkspace":{"id":1}},{"name":"B","x":100,"y":0,"activeWorkspace":{"id":3}}]' \
+  '[{"id":1,"name":"1","monitor":"A","windows":1},{"id":2,"name":"2","monitor":"A","windows":1},{"id":3,"name":"3","monitor":"B","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xb","workspace":{"id":2}},{"address":"0xc","workspace":{"id":3}}]'
+out=$(PLONK_GROUP_MONITORS=on run_plonk)
+[[ $out == "plonk: Already Plonked!" && ! -s $log ]] || fail "a grouped layout is left alone, got: $out"
+write_stub '{"id":1}' \
+  '[{"name":"A","x":0,"y":0,"focused":true,"activeWorkspace":{"id":1}},{"name":"B","x":100,"y":0,"activeWorkspace":{"id":4}}]' \
+  '[{"id":1,"name":"1","monitor":"A","windows":1},{"id":2,"name":"2","monitor":"A","windows":0,"ispersistent":true},{"id":4,"name":"4","monitor":"B","windows":1}]' \
+  '[{"address":"0xa","workspace":{"id":1}},{"address":"0xc","workspace":{"id":4}}]'
+PLONK_GROUP_MONITORS=on run_plonk >/dev/null
+grep -E 'id = 2\b' "$log" >/dev/null && fail "never lands on a persistent workspace's number, log=$(cat "$log")"
+grep -Fx 'dispatch hl.dsp.workspace.change_id({ workspace = "4", id = 3 })' "$log" >/dev/null || fail "packs around the persistent one, log=$(cat "$log")"
+pass "group_monitors: a grouped layout is a no-op and persistent numbers are respected"
+
+# Unknown value is refused loudly and treated as off.
+out=$(PLONK_GROUP_MONITORS=maybe run_plonk 2>&1 >/dev/null || true)
+grep -F "unknown group_monitors mode 'maybe'" <<<"$out" >/dev/null || fail "bad group_monitors value warns, got: $out"
+pass "group_monitors: unknown value warns and stays off"
+
 echo "all tests passed"

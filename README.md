@@ -74,6 +74,12 @@ Workspace IDs do not restart per display. Plonk therefore compacts them globally
 
 For example, workspaces 3 and 5 on `eDP-1` plus 7 and 8 on `HDMI-A-1` become 1, 2, 3, and 4. The first pair stays on `eDP-1`; the second pair stays on `HDMI-A-1`.
 
+### Keep each monitor's workspaces together
+
+By default the number line is packed by number alone, so one screen's workspaces can sit between the other's (`1 2 4` on the left screen and `3` on the right reads `1 2 3 4`). Set **`group_monitors=on`** and each monitor's workspaces are numbered as a block, monitors running left to right by their place in your layout: the left-most screen takes `1…k`, the next `k+1…`, and so on. A gap closes within its own screen, and a workspace you drag to the other screen renumbers into that screen's block.
+
+Some renumbers have to trade places (workspaces 3 and 4 swapping because they sit on different screens). Hyprland refuses to renumber onto a number in use, so plonk applies the moves in an order that only ever lands on a free number, and hops one workspace through a spare high number when two really do swap. Your windows, their monitors and your titles stay with their workspaces. A `persistent` workspace keeps its number and the pack goes around it. Off by default, so existing setups are unchanged.
+
 ## What it will—and will not—touch
 
 <img src="assets/readme/safety-boundary.svg" alt="Safety boundary showing that Plonk touches occupied numeric workspace IDs but leaves named workspaces, scratchpads, and layouts alone" width="100%">
@@ -127,7 +133,7 @@ Clone the repository, pin the release you reviewed, and install the script from 
 git clone https://github.com/nixfred/plonk.git
 cd plonk
 git tag --list          # pick a release
-git checkout v1.3.0     # pin it, then read plonk before installing
+git checkout v1.4.0     # pin it, then read plonk before installing
 install -Dm755 plonk ~/.local/bin/plonk
 ```
 
@@ -195,6 +201,7 @@ renumber=move       # or change_id — see "How it works"   (env PLONK_RENUMBER)
 empty_active=keep   # or fill — see "Auto-plonk"          (env PLONK_EMPTY_ACTIVE)
 empty_names=keep    # or archive — preserve old names without reserving vanished slots (env PLONK_EMPTY_NAMES)
 keep_open=off       # or one — hold ONE empty workspace open            (env PLONK_KEEP_OPEN)
+group_monitors=off  # or on — number each monitor's workspaces as a block, left to right (env PLONK_GROUP_MONITORS)
 rescue_stranded=off # or on — bring back a floating window stranded off-screen (env PLONK_RESCUE_STRANDED)
 ```
 

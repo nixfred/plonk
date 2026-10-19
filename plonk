@@ -26,6 +26,8 @@
 # you look away; released once you use it or open a different empty one.
 # rescue_stranded=on brings back a floating window that is wholly off every
 # monitor — the usual reason a workspace that LOOKS empty never clears.
+# group_monitors=on keeps each monitor's workspaces together on the number line:
+# the left-most monitor takes 1..k, the next k+1.., so a gap closes per screen.
 # If you were sitting on an empty workspace you land on the first free slot
 # after the compacted ones. Silent by default: --notify adds a desktop
 # notification (omarchy-notification-send / notify-send) in any mode.
@@ -108,6 +110,7 @@ EMPTY_ACTIVE=keep
 EMPTY_NAMES=keep
 KEEP_OPEN=off
 RESCUE_STRANDED=off
+GROUP_MONITORS=off
 CONFIG_WARNED=
 config_warn() { # once per process: a daemon must not repeat this every round
   [[ -n $CONFIG_WARNED ]] && return 0
@@ -122,7 +125,7 @@ config_file_usable() {
   (( size <= 65536 ))
 }
 read_config() {
-  local renumber=${PLONK_RENUMBER:-} empty=${PLONK_EMPTY_ACTIVE:-} names=${PLONK_EMPTY_NAMES:-} keep=${PLONK_KEEP_OPEN:-} rescue=${PLONK_RESCUE_STRANDED:-} line key val n=0
+  local renumber=${PLONK_RENUMBER:-} empty=${PLONK_EMPTY_ACTIVE:-} names=${PLONK_EMPTY_NAMES:-} keep=${PLONK_KEEP_OPEN:-} rescue=${PLONK_RESCUE_STRANDED:-} group=${PLONK_GROUP_MONITORS:-} line key val n=0
   if [[ -n $CONFIG_DIR ]] && config_file_usable "$CONFIG_DIR/config"; then
     while IFS= read -r line || [[ -n $line ]]; do
       (( ++n > 64 )) && break
@@ -137,6 +140,7 @@ read_config() {
         empty_names)  [[ -n $names ]] || names=$val ;;
         keep_open)    [[ -n $keep ]] || keep=$val ;;
         rescue_stranded) [[ -n $rescue ]] || rescue=$val ;;
+        group_monitors) [[ -n $group ]] || group=$val ;;
         *) config_warn "unknown option '$key' in $CONFIG_DIR/config (ignored)" ;;
       esac
     done <"$CONFIG_DIR/config"
@@ -164,6 +168,10 @@ read_config() {
   case "${rescue:-off}" in
     off|on) RESCUE_STRANDED=${rescue:-off} ;;
     *) config_warn "unknown rescue_stranded mode '$rescue' (want off or on); off"; RESCUE_STRANDED=off ;;
+  esac
+  case "${group:-off}" in
+    off|on) GROUP_MONITORS=${group:-off} ;;
+    *) config_warn "unknown group_monitors mode '$group' (want off or on); off"; GROUP_MONITORS=off ;;
   esac
 }
 
@@ -852,8 +860,78 @@ compact_unlocked() {
       | $id else empty end' <<<"$names_for_slots" 2>/dev/null)
   fi
 
+  # group_monitors=on: reorder the pack list (id-sorted "id<TAB>monitor<TAB>wins"
+  # lines) so each monitor's workspaces are contiguous, monitors left to right
+  # by their position in the layout (x, then y), ids ascending inside each.
+  # Off: the list passes through untouched.
+  order_pack() {
+    if [[ $GROUP_MONITORS != on ]]; then cat; return 0; fi
+    local rank
+    rank=$(jq -r '[ . | sort_by([.x // 0, .y // 0]) | .[] | .name ] | join(" ")' <<<"$monitors" 2>/dev/null || true)
+    awk -F'\t' -v order="$rank" 'BEGIN{n=split(order,o," "); for(i=1;i<=n;i++) r[o[i]]=i}
+      {k=($2 in r)?r[$2]:9999; printf "%d\t%d\t%s\n", k, $1, $0}' | sort -n -k1,1 -k2,2 | cut -f3-
+  }
+
+  # Apply the renumbers a grouped pass planned. A move may only land on a free
+  # number, so ones whose destination is still occupied wait for it to empty. A
+  # pure swap (a workspace changing places with another, e.g. one dragged to the
+  # other screen) has no free end: one side hops through a spare high number.
+  apply_plan() {
+    ((plan_n = ${#plan_src[@]})) || true
+    ((plan_n > 0)) || return 0
+    local i left=$plan_n progress tmp via
+    if ((dry)); then
+      for i in "${!plan_src[@]}"; do
+        echo "would plonk workspace ${plan_src[i]} -> ${plan_dst[i]} (${plan_mon[i]})"
+      done
+      return 0
+    fi
+    while ((left > 0)); do
+      progress=0
+      for i in "${!plan_src[@]}"; do
+        [[ -n ${plan_src[i]} ]] || continue
+        [[ -z ${taken[${plan_dst[i]}]+x} ]] || continue
+        if ! renumber "${plan_src[i]}" "${plan_dst[i]}" "${plan_mon[i]}" "${plan_wins[i]}"; then
+          plan_src[i]=; left=$((left - 1)); progress=1; continue
+        fi
+        via=
+        [[ -n ${plan_via[i]:-} ]] && via=${plan_via[i]}
+        if ((quiet)); then echo "plonk: plonked workspace ${via:-${plan_src[i]}} -> ${plan_dst[i]} (${plan_mon[i]})" >&2
+        else echo "plonked workspace ${via:-${plan_src[i]}} -> ${plan_dst[i]} (${plan_mon[i]})"; fi
+        plan_src[i]=; left=$((left - 1)); progress=1
+      done
+      ((progress)) && continue
+      # Everything left waits on something else: break the cycle through a spare.
+      for i in "${!plan_src[@]}"; do
+        [[ -n ${plan_src[i]} ]] || continue
+        tmp=101
+        while [[ -n ${taken[$tmp]+x} ]]; do tmp=$((tmp + 1)); done
+        plan_via[i]=${plan_via[i]:-${plan_src[i]}}
+        if renumber "${plan_src[i]}" "$tmp" "${plan_mon[i]}" "${plan_wins[i]}"; then
+          plan_src[i]=$tmp
+        else
+          plan_src[i]=; left=$((left - 1))   # cannot hop: give this one up, never spin
+        fi
+        break
+      done
+    done
+  }
+
   target=1
   active_seen=0
+  # group_monitors=on: workspaces are numbered monitor by monitor (left-most
+  # first), so a workspace may have to move UP the line to make room for the
+  # block before it. Those renumbers are collected and applied after the loop,
+  # in an order that never lands on a number still in use.
+  local grouped=0 plan_n=0
+  local -a plan_src=() plan_dst=() plan_mon=() plan_wins=() plan_via=()
+  [[ $GROUP_MONITORS == on ]] && grouped=1
+  if ((grouped)); then
+    # A persistent workspace is outside the pack but still owns its number.
+    while IFS= read -r id; do
+      [[ $id =~ ^[0-9]+$ ]] && blocked[$id]=1
+    done < <(jq -r '.[] | select(.id > 0 and .ispersistent == true) | .id' <<<"$workspaces")
+  fi
   while IFS=$'\t' read -r ws mon wins; do
     [[ $ws =~ ^[0-9]+$ ]] || continue
     # The empty workspace you are STANDING ON is yours: you opened it at that
@@ -879,7 +957,11 @@ compact_unlocked() {
     while ((skip_target != 0 && target == skip_target)) || [[ -n ${blocked[$target]+x} ]]; do
       target=$((target + 1))
     done
-    if ((target > ws)); then
+    if ((grouped && ws != target)); then
+      plan_src+=("$ws"); plan_dst+=("$target"); plan_mon+=("$mon"); plan_wins+=("$wins")
+      if ((ws == active)); then new_active=$target; fi
+      moves=$((moves + 1))
+    elif ((target > ws && !grouped)); then
       # Never push a workspace UP the number line — that is not compaction.
       # A reserved slot below it can walk the target past where it already is.
       target=$ws
@@ -904,7 +986,9 @@ compact_unlocked() {
       # persistent workspace is configured to own its number — leave it.
       | .id as $id
       | select(.windows > 0 or (.ispersistent != true and ($shown | index($id)) != null))
-      | "\(.id)\t\(.monitor)\t\(.windows)"' <<<"$workspaces" | sort -n)
+      | "\(.id)\t\(.monitor)\t\(.windows)"' <<<"$workspaces" | sort -n | order_pack)
+
+  apply_plan
 
   # Sitting on an empty workspace above the pack? Land on the first free slot.
   if ((keep_empty_active == 0 && active_seen == 0 && active > target)); then
